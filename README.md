@@ -17,14 +17,6 @@ Evidence Recovery*. Version 0.1.0, commit
 [`6bc202e`](https://github.com/Lola-W/RIVER/tree/6bc202eed7c345a6876124b24829b877bc7726a3).
 [Source repository](https://github.com/Lola-W/RIVER). MIT License.
 
-RIVER provides the standalone implementation of cross-method read-support
-assessment. This benchmark package retains study-specific preparation and
-plotting code and the supplied processed tables. Citing the standalone version
-does not establish that every historical table was generated with that commit.
-The RIVER repository is currently private; access for reviewers and readers
-must be arranged before relying on this link for code availability. Add its
-archived release DOI when available.
-
 **ppmSeq variant calling:** maintained in a separate repository. The repository
 URL is **pending**: `https://github.com/OWNER/PPMSEQ_VARIANT_CALLING` 
 
