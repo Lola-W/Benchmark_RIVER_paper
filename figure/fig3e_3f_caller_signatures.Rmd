@@ -1,0 +1,306 @@
+---
+title: "benchmarking_figures"
+author: "dcha"
+date: "2026-08-24"
+output: html_document
+---
+
+### Finalized TSVs
+```{r setup}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+
+source("../R/nature_biotech_ggplot.R")
+
+raw <- read_tsv("../raw_data/raw_duplex_pileup_newPTA_altge1.tsv")
+nogerm <- read_tsv("../raw_data/no_germline.no_blacklist.duplex_pileup_newPTA_altge1.tsv")
+filt <- read_tsv("../raw_data/no_unrelated.no_germline.no_blacklist.duplex_pileup_newPTA_altge1_unrel_lowci.tsv")
+
+```
+
+### De novo mutatational signature raw data points
+```{r}
+mutSig_vcf<-read_tsv("../raw_data/vcf_sig_denovo.tsv")
+cosmic_refit_mutSig_vcf<-read_tsv("../raw_data/vcf_sig_cosmic_refit.tsv")
+vcf_trinuc <- read_tsv("../raw_data/vcf_trinuc.tsv")
+sig_vcf_trinuc <- read_tsv("../raw_data/SBS96_vcf_sig.tsv")
+
+
+# mutSig_bamEvidence<-read_tsv("../raw_data/bamEvidence_sig_denovo.tsv")
+# cosmic_refit_mutSig_bamEvidence<-read_tsv("../raw_data/bamEvidence_sig_cosmic_refit.tsv")
+# bamEvidence_trinuc <- read_tsv("../raw_data/bamEvidence_trinuc.tsv")
+# sig_bamEvidence_trinuc <- read_tsv("../raw_data/SBS96_bamEvidence_sig.tsv")
+```
+
+### Fig 3f
+```{r fig3f, fig.width=7.2, fig.height=5.2, dpi=450}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+
+
+# ---- 1) De novo rename map: SBS96A->Sig1 ... SBS96D->Sig4 ----
+denovo_map <- c(
+  "Signature 96-A" = "Sig1",
+  "Signature 96-B" = "Sig2",
+  "Signature 96-C" = "Sig3",
+  "Signature 96-D" = "Sig4",
+  "SBS96A" = "Sig1",
+  "SBS96B" = "Sig2",
+  "SBS96C" = "Sig3",
+  "SBS96D" = "Sig4"
+)
+
+# ---- 2) Parse "Global NMF Signatures" into long df: (denovo, cosmic, pct) ----
+# cosmic_refit_mutSig_vcf columns:
+# `De novo extracted`, `Global NMF Signatures`, ...
+df_cosmic_refit_mutSig_vcf <- cosmic_refit_mutSig_vcf %>%
+  transmute(
+    denovo_raw = `De novo extracted`,
+    mix_raw = `Global NMF Signatures`
+  ) %>%
+  mutate(
+    denovo = recode(denovo_raw, !!!denovo_map, .default = denovo_raw),
+    # Split by '&'
+    mix_raw = str_replace_all(mix_raw, "\\s*&\\s*", "&"),
+    parts = str_split(mix_raw, "&", simplify = FALSE)
+  ) %>%
+  tidyr::unnest_longer(parts) %>%
+  mutate(
+    parts = str_trim(parts),
+    # Extract SBS id + percent in parentheses
+    cosmic = str_extract(parts, "SBS\\d+"),
+    pct = as.numeric(str_match(parts, "\\(([-0-9.]+)%\\)")[,2])
+  ) %>%
+  filter(!is.na(cosmic), !is.na(pct)) %>%
+  select(denovo, cosmic, pct)
+
+# ---- 3) Plot: bubble, fill by cosmic (pastel), label pct ----
+y_levels <- c("Sig1","Sig2","Sig3","Sig4")
+
+cosmic_cols <- c(
+  SBS1  = "#A8DADC",  # pastel cyan
+  SBS2  = "#F4A261",  # soft orange
+  SBS5  = "#8EC9B8",  # mint
+  SBS8  = "#C9CCD6",  # light grey-lavender
+  SBS16 = "#B8A1D9",  # pastel purple
+  SBS31 = "#F6BD60",  # soft yellow-orange
+  SBS32 = "#9DB4E0"   # pastel blue
+)
+x_levels <- cosmic_cols %>% names(.)
+
+ggplot(
+  df_cosmic_refit_mutSig_vcf %>%
+    mutate(
+      cosmic = factor(cosmic, levels = x_levels),
+      denovo = factor(denovo, levels = y_levels)
+    )
+) +
+  geom_point(
+    aes(x = cosmic, y = denovo, size = pct, fill = cosmic),
+    shape = 21,
+    color = "grey20",
+    stroke = 0.55
+  ) +
+  geom_text(
+    aes(x = cosmic, y = denovo, label = sprintf("%.1f%%", pct)),
+    family = "Arial",
+    size = 7 / ggplot2::.pt,
+    fontface = "bold",
+    lineheight = 0.9
+  ) +
+  scale_fill_manual(values = cosmic_cols, name = "COSMIC") +
+  scale_size(
+    range = c(9, 18),
+    breaks = c(10, 25, 50, 75),
+    name = "Contribution (%)"
+  ) +
+  scale_y_discrete(limits = rev(levels(factor(y_levels)))) +
+  coord_cartesian(clip = "off") +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.major = element_line(color = "grey92", linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    axis.ticks = element_blank(),
+    legend.title = element_text(face = "bold"),
+    legend.position = "right"
+  ) +
+  theme_nbt(base_size = 7)
+```
+
+### Fig 3g
+```{r fig3g, fig.width=7.2, fig.height=5.9, dpi=450}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tibble)
+  library(ComplexHeatmap)
+  library(circlize)
+  library(grid)
+})
+
+# ---- make matrix: rows = 96 contexts, cols = samples ----
+mat_96 <- vcf_trinuc %>%
+  as.data.frame() %>%
+  column_to_rownames("MutationType") %>%
+  as.matrix()
+
+# ---- cosine similarity between samples (columns) ----
+cos_sim_cols <- function(m){
+  m_scaled <- apply(m, 2, function(x){
+    s2 <- sum(x^2)
+    if (s2 == 0) return(rep(0, length(x)))
+    x / sqrt(s2)
+  })
+  t(m_scaled) %*% m_scaled
+}
+
+sim_96 <- cos_sim_cols(mat_96)
+
+# ---- cosine distance + clustering ----
+dist_96 <- 1 - sim_96
+dist_96[dist_96 < 0] <- 0
+diag(dist_96) <- 0
+
+hc_96 <- hclust(as.dist(dist_96), method = "average")
+sample_labels_96 <- normalize_seq_method(colnames(sim_96))
+
+
+col_fun <- colorRamp2(
+  c(0, 0.5, 0.75, 0.9, 1),
+  c("#FFFFFF",
+    "#E3EEF9",
+    "#9ECAE1",
+    "#2171B5",
+    "#08306B")
+)
+ht <- Heatmap(
+  sim_96,
+  name = "Cosine\nSimilarity",
+  col = col_fun,
+  cluster_rows = as.dendrogram(hc_96),
+  cluster_columns = as.dendrogram(hc_96),
+  row_labels = sample_labels_96,
+  column_labels = sample_labels_96,
+  row_names_gp = gpar(fontfamily = "Arial", fontsize = 7),
+  column_names_gp = gpar(fontfamily = "Arial", fontsize = 7),
+  show_row_dend = FALSE,
+  column_dend_height = unit(30, "mm"),
+  row_names_side = "left",
+  column_names_rot = 45,
+  heatmap_legend_param = list(
+    at = c(0, 0.5, 0.75, 0.9, 1),
+    labels = c("0", "0.5", "0.75", "0.9", "1"),
+    title = "Cosine similarity",
+    title_gp = gpar(fontfamily = "Arial", fontsize = 7),
+    labels_gp = gpar(fontfamily = "Arial", fontsize = 7)
+  )
+)
+
+draw(ht)
+
+```
+
+### Fig 3h
+```{r fig3h, fig.width=7.2, fig.height=5.0, dpi=450}
+suppressPackageStartupMessages({
+  library(ComplexHeatmap)
+  library(circlize)
+  library(grid)
+})
+
+trin <- mutSig_vcf %>%
+  dplyr::rename(
+    Sig1 = SBS96A,
+    Sig2 = SBS96B,
+    Sig3 = SBS96C,
+    Sig4 = SBS96D
+  ) %>%
+  tidyr::pivot_longer(
+    cols = c(Sig1, Sig2, Sig3, Sig4),
+    names_to = "trinuc",
+    values_to = "value"
+  ) %>%
+  tidyr::pivot_wider(
+    names_from = Samples,
+    values_from = value
+  )
+
+mat_raw <- trin %>%
+  tibble::column_to_rownames("trinuc") %>%
+  as.matrix()
+
+# ---- relative activity (% within each sample) ----
+mat_sig_pct <- apply(mat_raw, 2, function(x){
+  s <- sum(x)
+  if (s == 0) return(rep(0, length(x)))
+  100 * x / s
+})
+mat_sig_pct <- as.matrix(mat_sig_pct)
+rownames(mat_sig_pct) <- rownames(mat_raw)   # Sig1-4
+colnames(mat_sig_pct) <- colnames(mat_raw)   # Samples
+
+# ---- red-ish palette ----
+col_fun_red <- colorRamp2( c(0, 25, 50, 75, 100), c("#FFF5F0", "#FCAE91", "#FB6A4A", "#DE2D26", "#A50F15") )
+col_fun_red <- colorRamp2(
+  c(0, 25, 50, 75, 100),
+  c("#FFFFFF",
+    "#FDE0DD",
+    "#FCAE91",
+    "#FB6A4A",
+    "#CB181D")
+)
+sample_labels_sig <- gsub(
+  "_", " ",
+  normalize_seq_method(colnames(mat_sig_pct)),
+  fixed = TRUE
+)
+
+ht_sig <- Heatmap(
+  mat_sig_pct,
+  name = "Activity\n(%)",
+  col = col_fun_red,
+  cluster_rows = FALSE,
+  cluster_columns = as.dendrogram(hc_96),   # << keep the 96D dendrogram
+  column_labels = sample_labels_sig,
+  row_names_gp = gpar(fontfamily = "Arial", fontsize = 7),
+  column_names_gp = gpar(fontfamily = "Arial", fontsize = 7),
+  show_row_dend = FALSE,
+  column_dend_height = unit(30, "mm"),
+  row_names_side = "left",
+  column_names_rot = 90,
+  heatmap_legend_param = list(
+    color_bar = "continuous",
+    at = c(0, 50, 100),
+    labels = c("0", "50", "100"),
+    title = "Activity (%)",
+    title_position = "topleft",
+    legend_direction = "vertical",
+    legend_height = unit(30, "mm"),
+    legend_width = unit(3, "mm"),
+    tick_length = unit(1, "mm"),
+    border = NA,
+    title_gp = gpar(fontfamily = "Arial", fontsize = 7),
+    labels_gp = gpar(fontfamily = "Arial", fontsize = 7)
+  ),
+  cell_fun = function(j, i, x, y, w, h, fill){
+    grid.text(
+      sprintf("%.1f", mat_sig_pct[i, j]), x, y,
+      gp = gpar(
+        fontfamily = "Arial",
+        fontsize = 7,
+        col = ifelse(mat_sig_pct[i, j] >= 80, "white", "black")
+      )
+    )
+  }
+)
+
+draw(ht_sig)
+
+```

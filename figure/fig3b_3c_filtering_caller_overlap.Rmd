@@ -1,0 +1,602 @@
+---
+title: "benchmarking_figures"
+author: "dcha"
+date: "2026-08-24"
+output: html_document
+---
+
+### Finalized TSVs
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+source("../R/nature_biotech_ggplot.R")
+
+filter_status_colours <- c(
+  "kept" = "#4C72B0",
+  "removed_unrelated_pon" = "#009E73",
+  "unrelated_pon_removed" = "#D62728",
+  "removed_germline" = "#D62728"
+)
+
+raw <- read_tsv("../raw_data/raw_duplex_pileup_newPTA_altge1.tsv")
+nogerm <- read_tsv("../raw_data/no_germline.no_blacklist.duplex_pileup_newPTA_altge1.tsv")
+filt <- read_tsv("../raw_data/no_unrelated.no_germline.no_blacklist.duplex_pileup_newPTA_altge1_unrel_lowci.tsv")
+```
+
+### Fig 3b
+```{r fig3b, fig.width=7.2, fig.height=4.5, dpi=450}
+library(grid)
+
+
+call_cols_full_depth <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  "call_ppmSeq_singleton_HC",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+no_black <- raw %>%
+  dplyr::filter(
+    blacklist_any==0,
+    gnomad_common==0,
+    in_hmer7==0,
+    in_simple_repeats_ucsc==0
+  )
+
+count_calls <- function(df, call_cols){
+  df %>%
+    summarise(
+      dplyr::across(dplyr::all_of(call_cols), ~ sum(.x==1, na.rm=TRUE))
+    )
+}
+
+# ---- Step0: before filtering ----
+cnt0 <- count_calls(no_black, call_cols_full_depth)
+
+# ---- Germline filter (is_germline + any germline_like) ----
+gll_cols <- colnames(no_black)[stringr::str_detect(
+  colnames(no_black),
+  "^is_germline_like_upper_ci_052_"
+)]
+
+after_germline <- no_black %>%
+  dplyr::filter(
+    !(is_germline==1 |
+      rowSums(dplyr::across(dplyr::all_of(gll_cols), ~ as.integer(.x==1)), na.rm=TRUE) > 0)
+  )
+
+cnt1 <- count_calls(after_germline, call_cols_full_depth)
+
+# ---- Unrelated filter ----
+after_unrelated_pon <- after_germline %>%
+  dplyr::filter(existing_in_unrelated==0)
+  #dplyr::filter(altge1_in_unrelated==0)
+
+cnt2 <- count_calls(after_unrelated_pon, call_cols_full_depth)
+
+# ---- Final table (rows = callset) ----
+out2 <- dplyr::bind_rows(
+  cnt0 %>% mutate(stage="before_filter"),
+  cnt1 %>% mutate(stage="after_germline"),
+  cnt2 %>% mutate(stage="after_unrelated_pon")
+) %>%
+  tidyr::pivot_longer(-stage, names_to="callset", values_to="n") %>%
+  tidyr::pivot_wider(names_from=stage, values_from=n) %>%
+  dplyr::select(
+    callset,
+    before_filter,
+    after_germline,
+    after_unrelated_pon
+  )
+
+out2
+
+
+viz_rel_stacked <- out2 %>%
+  dplyr::mutate(callset = factor(callset, levels = rev(out2$callset))) %>%
+  dplyr::rename(
+    before = before_filter,
+    after_germline = after_germline,
+    after_pon = after_unrelated_pon
+  ) %>%
+  dplyr::mutate(
+    removed_germline = (before - after_germline) / before,
+    removed_unrelated_pon      = (after_germline - after_pon) / before,
+    kept             = after_pon / before
+  ) %>%
+  dplyr::select(callset, removed_germline, removed_unrelated_pon, kept) %>%
+  tidyr::pivot_longer(
+    -callset,
+    names_to = "component",
+    values_to = "prop"
+  ) %>%
+  dplyr::mutate(
+    component = factor(
+      component,
+      levels = c("removed_germline", "removed_unrelated_pon", "kept")
+    )
+  )
+
+new_lev <- viz_rel_stacked$callset %>% levels(.) %>% str_replace_all(., "^call_", "")
+viz_rel_stacked$callset <- viz_rel_stacked$callset %>% str_replace_all(., "^call_", "")
+viz_rel_stacked$callset <- factor(viz_rel_stacked$callset, levels = new_lev)
+
+
+lab_df <- viz_rel_stacked %>%
+  dplyr::mutate(component = as.character(component)) %>%
+  dplyr::group_by(callset) %>%
+  dplyr::arrange(match(component, c("kept", "removed_unrelated_pon", "removed_germline")), .by_group = TRUE) %>%
+  dplyr::mutate(
+    y_center = cumsum(prop) - prop / 2,
+    y_edge   = cumsum(prop),
+    y_line   = y_edge + 0.010,
+    y_label  = y_edge + 0.028,
+    label = ifelse(
+      prop >= 0.03,
+      scales::percent(prop, accuracy = 0.1),
+      scales::percent(prop, accuracy = 0.01)
+    )
+  ) %>%
+  dplyr::ungroup()
+
+ggplot(viz_rel_stacked, aes(x = callset, y = prop, fill = component)) +
+  geom_col(width = 0.75) +
+
+  # inside
+  geom_text(
+    data = lab_df %>% dplyr::filter(prop >= 0.03),
+    aes(x = callset, y = y_center, label = label),
+    inherit.aes = FALSE,
+    size = 2.5,
+    family = "Arial"
+  ) +
+
+  # thin connector line
+  geom_segment(
+    data = lab_df %>% dplyr::filter(prop < 0.03, prop > 0),
+    aes(x = callset, xend = callset, y = y_edge, yend = y_line),
+    inherit.aes = FALSE,
+    linewidth = 0.3
+  ) +
+
+  # label
+  geom_text(
+    data = lab_df %>% dplyr::filter(prop < 0.03, prop > 0),
+    aes(x = callset, y = y_label, label = label),
+    inherit.aes = FALSE,
+    hjust = 0,
+    size = 2.4,
+    family = "Arial"
+  ) +
+
+  coord_flip(clip = "off") +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    expand = expansion(mult = c(0, 0.10))
+  ) +
+  scale_x_discrete(labels = normalize_seq_method) +
+  scale_fill_manual(
+    values = filter_status_colours,
+    breaks = c("kept", "removed_unrelated_pon", "removed_germline"),
+    labels = c("Kept", "Unrelated PoN removed", "Germline removed"),
+    name = NULL
+  ) +
+  theme_classic() +
+  labs(x = NULL, y = "Proportion (%)") +
+  theme_nbt(base_size = 7)
+
+```
+### Fig 3c
+```{r fig3c, fig.width=7.2, fig.height=6.7, dpi=450}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+
+call_cols_full_depth <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  "call_ppmSeq_singleton_HC",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+
+maf_map <- list(
+  call_Illumina = "ILLUMINA_MAF",
+  call_ppmSeq_multiread = "DUPLEX_PPMSEQ_MAF",
+  call_ppmSeq_singleton_HC = "DUPLEX_PPMSEQ_MAF",
+  call_UDSeq_multiread = "DUPLEX_UDSEQ_MAF",
+  call_UDSeq_singleton = "DUPLEX_UDSEQ_MAF",
+  call_NanoSeq_multiread = "DUPLEX_NANOSEQ_MAF",
+  call_NanoSeq_singleton = "DUPLEX_NANOSEQ_MAF",
+  call_HiDEFseq_double_stranded = "DUPLEX_HIDEFSEQ_MAF",
+  call_HiDEFseq_single_stranded = "DUPLEX_HIDEFSEQ_MAF"
+)
+
+maf_plot_df <- lapply(names(maf_map), function(cc){
+
+  maf_col <- maf_map[[cc]]
+
+  nogerm %>%
+    dplyr::filter(.data[[cc]] == 1) %>%
+    dplyr::mutate(
+      callset = stringr::str_replace(cc, "^call_", ""),
+      group = ifelse(existing_in_unrelated == 1,
+                     "unrelated_pon_removed",
+                     "kept"),
+      MAF = .data[[maf_col]]
+    ) %>%
+    dplyr::select(callset, group, MAF)
+
+}) %>%
+  dplyr::bind_rows() %>%
+  dplyr::filter(!is.na(MAF), MAF > 0, MAF <= 0.3)
+
+maf_plot_df$callset <- maf_plot_df$callset %>% factor(., levels=unique(maf_plot_df$callset))
+
+ggplot(maf_plot_df, aes(x = MAF, fill = group)) +
+  geom_histogram(
+    bins = 120,
+    alpha = 0.45,
+    position = "identity",
+    color = NA
+  ) +
+  facet_wrap(
+    ~callset,
+    scales = "free_y",
+    ncol = 1,
+    labeller = ggplot2::labeller(callset = normalize_seq_method)
+  ) +
+  scale_fill_manual(
+    values = filter_status_colours,
+    breaks = c("kept", "unrelated_pon_removed"),
+    labels = c("Kept", "Unrelated PoN removed"),
+    name = NULL
+  ) +
+  theme_classic(base_size = 13) +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold"),
+    legend.title = element_blank()
+  ) +
+  labs(
+    x = "Platform-specific BAM MAF (0-0.3)",
+    y = "Number of variants"
+  ) +
+  theme_nbt(base_size = 7)
+```
+
+
+
+### Fig 3d
+```{r fig3d, fig.width=7.2, fig.height=6.2, dpi=450}
+library(readr)
+library(dplyr)
+library(stringr)
+library(UpSetR)
+
+
+
+# ---- Build matrix for UpSetR (missing cols -> 0) ----
+make_mat_strata <- function(df, cols) {
+  out <- lapply(cols, function(x) {
+    if (x %in% colnames(df)) as.integer(df[[x]] %in% 1) else rep(0L, nrow(df))
+  })
+  mat <- as.data.frame(out, check.names = FALSE)
+  colnames(mat) <- cols
+  rownames(mat) <- NULL
+  mat
+}
+
+mat_calls <- make_mat_strata(filt, call_cols_full_depth)
+
+colnames(mat_calls) <- normalize_seq_method(
+  str_replace(colnames(mat_calls), "^call_", "")
+)
+
+# ---- Plot ----
+old_theme <- ggplot2::theme_set(ggplot2::theme_get() + theme_nbt(base_size = 7))
+
+fig3d <- upset(
+  mat_calls,
+  nsets = ncol(mat_calls),
+  nintersects = 200,
+  keep.order = TRUE,
+  order.by = "freq",
+  mainbar.y.label = "Intersection size",
+  sets.x.label = "Set size",
+  matrix.color = NBT_METHOD_BASE_COLOURS[["Reference"]],
+  main.bar.color = NBT_METHOD_BASE_COLOURS[["Reference"]],
+  sets.bar.color = NBT_METHOD_BASE_COLOURS[["Reference"]],
+  text.scale = c(7/8.3, 1, 7/8.3, 1, 0.8, 1)
+)
+
+break_lower <- 16000
+break_upper <- 58000
+break_spacer <- 500
+
+map_broken_axis <- function(value) {
+  ifelse(
+    value >= break_upper,
+    break_lower + break_spacer + value - break_upper,
+    value
+  )
+}
+
+break_tick_raw <- c(0, 5000, 10000, 15000, 60000)
+break_tick_display <- map_broken_axis(break_tick_raw)
+size_break_tick_raw <- c(0, 10000, 60000)
+size_break_tick_display <- map_broken_axis(size_break_tick_raw)
+
+main_bar_data <- UpSetR:::Counter(
+  fig3d$New_data,
+  length(fig3d$Set_names),
+  fig3d$first.col,
+  fig3d$Set_names,
+  200,
+  NBT_METHOD_BASE_COLOURS[["Reference"]],
+  "freq",
+  "degree",
+  NULL,
+  NULL,
+  TRUE
+)
+
+if (any(main_bar_data$freq > break_lower & main_bar_data$freq < break_upper)) {
+  stop("Compressed Fig. 3d axis is invalid: an intersection lies inside the omitted range.")
+}
+
+main_bar_data <- main_bar_data %>%
+  dplyr::mutate(
+    display_freq = map_broken_axis(freq)
+  )
+
+bar_break_marks <- main_bar_data %>%
+  dplyr::filter(freq >= break_upper) %>%
+  dplyr::select(x) %>%
+  tidyr::crossing(mark = c(1, 2)) %>%
+  dplyr::mutate(
+    x_start = x - 0.28,
+    x_end = x + 0.28,
+    y_start = ifelse(
+      mark == 1,
+      break_lower - 100,
+      break_lower + break_spacer - 100
+    ),
+    y_end = y_start + 200
+  )
+
+main_axis_break_marks <- data.frame(
+  x_start = c(0, 0.10),
+  x_end = c(0.16, 0.26),
+  y_start = c(
+    break_lower - 100,
+    break_lower + break_spacer - 100
+  )
+)
+main_axis_break_marks$y_end <- main_axis_break_marks$y_start + 200
+
+main_y_max <- max(main_bar_data$display_freq) * 1.1
+
+main_bar_plot <- ggplot2::ggplot(
+  main_bar_data,
+  ggplot2::aes(x = x, y = display_freq)
+) +
+  ggplot2::geom_col(
+    width = 0.6,
+    fill = NBT_METHOD_BASE_COLOURS[["Reference"]]
+  ) +
+  ggplot2::geom_vline(xintercept = 0, colour = "black") +
+  ggplot2::geom_hline(yintercept = 0, colour = "black") +
+  ggplot2::annotate(
+    "rect",
+    xmin = -Inf,
+    xmax = Inf,
+    ymin = break_lower,
+    ymax = break_lower + break_spacer,
+    fill = "white",
+    colour = NA
+  ) +
+  ggplot2::geom_segment(
+    data = main_axis_break_marks,
+    ggplot2::aes(
+      x = x_start,
+      xend = x_end,
+      y = y_start,
+      yend = y_end
+    ),
+    inherit.aes = FALSE,
+    colour = "black",
+    linewidth = 0.35
+  ) +
+  ggplot2::geom_segment(
+    data = bar_break_marks,
+    ggplot2::aes(
+      x = x_start,
+      xend = x_end,
+      y = y_start,
+      yend = y_end
+    ),
+    inherit.aes = FALSE,
+    colour = "white",
+    linewidth = 0.35
+  ) +
+  ggplot2::geom_text(
+    ggplot2::aes(label = freq),
+    family = "Arial",
+    size = 2.2,
+    vjust = -1,
+    angle = 0,
+    colour = NBT_METHOD_BASE_COLOURS[["Reference"]]
+  ) +
+  ggplot2::scale_x_continuous(
+    limits = c(0, nrow(main_bar_data) + 1),
+    expand = c(0, 0),
+    breaks = NULL
+  ) +
+  ggplot2::scale_y_continuous(
+    limits = c(0, main_y_max),
+    breaks = break_tick_display,
+    labels = scales::comma(break_tick_raw, accuracy = 1),
+    expand = c(0, 0)
+  ) +
+  ggplot2::labs(x = NULL, y = "Intersection size", title = NULL) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::theme(
+    text = ggplot2::element_text(family = "Arial", size = 7),
+    panel.background = ggplot2::element_rect(fill = "white", colour = NA),
+    panel.grid = ggplot2::element_blank(),
+    panel.border = ggplot2::element_blank(),
+    plot.margin = grid::unit(c(0.5, 0.5, 0.5, 0.5), "lines"),
+    axis.title.y = ggplot2::element_text(
+      family = "Arial",
+      size = 7,
+      vjust = -0.8
+    ),
+    axis.text.y = ggplot2::element_text(
+      family = "Arial",
+      size = 7,
+      vjust = 0.3
+    ),
+    axis.text.x = ggplot2::element_blank(),
+    axis.ticks.x = ggplot2::element_blank()
+  )
+
+fig3d$Main_bar <- ggplot2::ggplotGrob(main_bar_plot)
+
+size_data <- data.frame(
+  set_index = seq_along(fig3d$Set_names),
+  raw_size = as.numeric(colSums(
+    fig3d$New_data[, fig3d$Set_names, drop = FALSE]
+  ))
+)
+
+if (any(size_data$raw_size > break_lower & size_data$raw_size < break_upper)) {
+  stop("Compressed Fig. 3d set-size axis is invalid: a set lies inside the omitted range.")
+}
+
+size_data <- size_data %>%
+  dplyr::mutate(display_size = map_broken_axis(raw_size))
+
+size_bar_break_marks <- size_data %>%
+  dplyr::filter(raw_size >= break_upper) %>%
+  dplyr::select(set_index) %>%
+  tidyr::crossing(mark = c(1, 2)) %>%
+  dplyr::mutate(
+    set_start = set_index - 0.18,
+    set_end = set_index + 0.18,
+    size_start = ifelse(
+      mark == 1,
+      break_lower - 100,
+      break_lower + break_spacer - 100
+    ),
+    size_end = size_start + 200
+  )
+
+size_axis_break_marks <- data.frame(
+  set_start = c(0.5, 0.58),
+  set_end = c(0.62, 0.70),
+  size_start = c(
+    break_lower - 100,
+    break_lower + break_spacer - 100
+  )
+)
+size_axis_break_marks$size_end <- size_axis_break_marks$size_start + 200
+
+size_axis_max <- max(size_data$display_size) * 1.1
+
+size_plot_broken <- ggplot2::ggplot(
+  size_data,
+  ggplot2::aes(x = set_index, y = display_size)
+) +
+  ggplot2::geom_col(
+    width = 0.4,
+    fill = NBT_METHOD_BASE_COLOURS[["Reference"]],
+    colour = NBT_METHOD_BASE_COLOURS[["Reference"]]
+  ) +
+  ggplot2::annotate(
+    "rect",
+    xmin = -Inf,
+    xmax = Inf,
+    ymin = break_lower,
+    ymax = break_lower + break_spacer,
+    fill = "white",
+    colour = NA
+  ) +
+  ggplot2::geom_segment(
+    data = size_axis_break_marks,
+    ggplot2::aes(
+      x = set_start,
+      xend = set_end,
+      y = size_start,
+      yend = size_end
+    ),
+    inherit.aes = FALSE,
+    colour = "black",
+    linewidth = 0.35
+  ) +
+  ggplot2::geom_segment(
+    data = size_bar_break_marks,
+    ggplot2::aes(
+      x = set_start,
+      xend = set_end,
+      y = size_start,
+      yend = size_end
+    ),
+    inherit.aes = FALSE,
+    colour = "white",
+    linewidth = 0.35
+  ) +
+  ggplot2::scale_x_continuous(
+    limits = c(0.5, nrow(size_data) + 0.5),
+    breaks = NULL,
+    expand = c(0, 0)
+  ) +
+  ggplot2::scale_y_reverse(
+    limits = c(size_axis_max, 0),
+    breaks = size_break_tick_display,
+    labels = scales::comma(size_break_tick_raw, accuracy = 1),
+    expand = c(0, 0)
+  ) +
+  ggplot2::labs(x = NULL, y = "Set size") +
+  ggplot2::coord_flip(clip = "off") +
+  ggplot2::theme(
+    text = ggplot2::element_text(family = "Arial", size = 7),
+    panel.background = ggplot2::element_rect(fill = "white", colour = NA),
+    plot.margin = grid::unit(c(-0.11, 0.3, 0.5, 0.5), "lines"),
+    axis.title.x = ggplot2::element_text(family = "Arial", size = 7),
+    axis.text.x = ggplot2::element_text(
+      family = "Arial",
+      size = 7,
+      vjust = 1,
+      hjust = 0.5
+    ),
+    axis.line = ggplot2::element_line(colour = "gray0"),
+    axis.line.y = ggplot2::element_blank(),
+    axis.line.x = ggplot2::element_line(colour = "gray0", linewidth = 0.3),
+    axis.text.y = ggplot2::element_blank(),
+    axis.ticks.y = ggplot2::element_blank(),
+    panel.grid.minor = ggplot2::element_blank(),
+    panel.grid.major = ggplot2::element_blank()
+  )
+
+fig3d$Sizes <- ggplot2::ggplotGrob(size_plot_broken)
+
+ggplot2::theme_set(old_theme)
+fig3d
+```

@@ -1,0 +1,2 @@
+#sample	tumor	normal	tumor_path	normal_path	vcf_path
+41411195_F_illumina_somatic_merged	41411195_F_illumina_somatic_merged	41411195_F_illumina_matchedNormal	../../inputs/7614_illumina_brain_somatic.bam	../../inputs/7614_illumina_matchedNormal.bam	../../inputs/41411195_F_illumina_somatic_merged.vcf.gz

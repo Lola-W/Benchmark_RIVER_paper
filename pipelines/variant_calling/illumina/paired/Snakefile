@@ -1,0 +1,281 @@
+# Calling rules extracted from the study workflow; see SOURCE_MANIFEST.tsv.
+configfile: "snake_conf.yaml"
+
+localrules: all, vcf_list_mutect, vcf_list_strelka
+
+N_INTERVALS = config['n_intervals']
+INTERVALS = ["%04d" % x for x in range(N_INTERVALS)]
+
+
+OUT_DIR = config['out_dir']
+SCRATCH_DIR = config['scratch_dir']
+
+BED_FILE = config['bed_file']
+REF = config['ref_fasta']
+GNOMAD_AF = config['gnomad_af']
+#GNOMAD = config['gnomad']
+
+GATK4 = config['gatk4']
+
+
+STRELKA = config['strelka_path']
+PYTHON2 = config["python2"]
+JAVA = config["java"]
+
+
+
+
+
+
+
+import pandas as pd
+import numpy as np
+import sys, os
+
+
+def make_input_dicts():
+    f = open(config['input_files'], "r")
+
+    tumor_dict = {}
+    normal_dict = {}
+    germline_dict = {}
+
+    for line in f:
+        if line.startswith("#"):
+            continue
+        words = line.rstrip().split("\t")
+        print(words)
+        sample_id = words[0]
+        tumor_id = words[1]
+        normal_id = words[2]
+        tumor_path = words[3]
+        normal_path = words[4]
+        germline_vcf_path = words[5]
+      
+        tumor_dict[sample_id] = [tumor_id, tumor_path]
+        normal_dict[sample_id] = [normal_id, normal_path]
+        germline_dict[sample_id] = germline_vcf_path
+    f.close()
+    return tumor_dict, normal_dict, germline_dict
+
+
+TUMOR_DICT, NORMAL_DICT, GERMLINE_DICT = make_input_dicts()
+
+
+
+
+rule all:
+    input:
+        expand(OUT_DIR + "/mutect_filter_vcf/{sample}_somatic.vcf.gz", sample=TUMOR_DICT),
+        expand(OUT_DIR + "/strelka_vcf/{sample}_somatic.vcf.gz", sample=TUMOR_DICT),
+              
+
+#split bed file to the designated number of intervals 
+rule get_intervals:
+    input:
+        BED_FILE
+    output:
+        expand(SCRATCH_DIR + "/intervals/{interval}-scattered.interval_list", interval=INTERVALS)
+    params:
+        cluster = "-q home -l nodes=1:ppn=1 -l walltime=2:00:00",
+        out_dir = SCRATCH_DIR + "/intervals/"
+    shell:
+        "{JAVA} -Xmx12G -jar {GATK4} SplitIntervals "
+        "    -R {REF} "
+        "    -L {input} "
+        "    --scatter-count {N_INTERVALS} "
+        "    -O {params.out_dir}; "
+        "sleep 60;"
+
+#convert each interval file into bed format
+rule convert_intervals_to_bed:
+    input:
+        interval = SCRATCH_DIR + "/intervals/{interval}-scattered.interval_list"
+    output:
+        bed = SCRATCH_DIR + "/intervals_bed/{interval}.bed.gz",
+        tbi = SCRATCH_DIR + "/intervals_bed/{interval}.bed.gz.tbi"
+    params:
+        cluster = "-q home -l nodes=1:ppn=1 -l walltime=2:00:00"
+    shell:
+        r"""
+        grep -v '@' {input.interval} | awk 'BEGIN {{OFS="\t"}} {{print $1,$2-1,$3}}' | bgzip > {output.bed};
+        """
+        "tabix -p bed {output.bed};"
+
+#run mutect2 on each interval
+rule run_mutect2:
+    input:
+        tumor = lambda wildcards: TUMOR_DICT[wildcards.sample][1],
+        normal = lambda wildcards: NORMAL_DICT[wildcards.sample][1],
+        ref = REF,
+        intervals = SCRATCH_DIR + "/intervals/{interval}-scattered.interval_list"
+    output:
+        vcf = SCRATCH_DIR + "/mutect_analysis/{sample}/{interval}_somatic.vcf.gz",
+        stats = SCRATCH_DIR + "/mutect_analysis/{sample}/{interval}_somatic.vcf.gz.stats"
+    params:
+        cluster = "-q home -l walltime=8:00:00 -l nodes=1:ppn=12",
+        tumor_id = lambda wildcards: TUMOR_DICT[wildcards.sample][0],
+        normal_id = lambda wildcards: NORMAL_DICT[wildcards.sample][0],
+        threads = 1
+    benchmark:
+        OUT_DIR + "/benchmarks/mutect2/{sample}/{interval}_mutect2.txt"
+    shell:
+        "{JAVA} -Xmx84G -jar {GATK4} "
+        "    Mutect2 "
+        "    -R {input.ref} "
+        "    -I {input.tumor} "
+        "    -I {input.normal} "
+        "    -tumor {params.tumor_id} "
+        "    -normal {params.normal_id} "
+        "    --af-of-alleles-not-in-resource 0.00003125 "
+        "    -L {input.intervals} "
+        "    --native-pair-hmm-threads {params.threads} "  # Pass threads to GATK
+        "    -O {output.vcf} "
+        "    --germline-resource {GNOMAD_AF} "
+
+
+#put the paths to all intervals in a file for each sample
+rule vcf_list_mutect:
+    input:
+        expand(SCRATCH_DIR + "/mutect_analysis/{{sample}}/{interval}_somatic.vcf.gz",
+                   interval=INTERVALS)
+    output:
+        SCRATCH_DIR + "/mutect_vcf_list/{sample}_vcf.list"
+    params:
+        cluster = "-q home -l nodes=1:ppn=1 -l walltime=12:00:00"
+    run:
+        f = open(output[0], "w")
+        for path in input:
+            f.write(path + "\n")
+        f.close()
+
+#merge the interval files together for each sample
+# rule gather_vcfs_mutect:
+#     input:
+#         SCRATCH_DIR + "/mutect_vcf_list/{sample}_vcf.list"
+#     output:
+#         vcf = OUT_DIR + "/mutect_vcf/{sample}_somatic.vcf.gz",
+#         tbi = OUT_DIR + "/mutect_vcf/{sample}_somatic.vcf.gz.tbi",
+#         stats = OUT_DIR + "/mutect_vcf/{sample}_somatic.vcf.gz.stats"
+#     params:
+#         cluster = "-q home -l nodes=1:ppn=6 -l walltime=24:00:00",
+#     shell:
+#         "{JAVA} -Xmx42G -jar {GATK4} "
+#         "    GatherVcfs "
+#         "    -I {input} "
+#         "    -O {output.vcf}; "
+#         "    -R {REF}"
+#         "tabix -p vcf {output.vcf}"
+#         "{JAVA} -Xmx8G -jar {GATK4} "
+#         "    MergeMutectStats "
+#         "    {params.stats_args} "
+#         "    -O {output.stats}"
+rule gather_vcfs_mutect:
+    input:
+        vcf_list = SCRATCH_DIR + "/mutect_vcf_list/{sample}_vcf.list",
+        stats    = expand(SCRATCH_DIR + "/mutect_analysis/{{sample}}/{interval}_somatic.vcf.gz.stats",
+                          interval=INTERVALS)
+    output:
+        vcf   = OUT_DIR + "/mutect_vcf/{sample}_somatic.vcf.gz",
+        tbi   = OUT_DIR + "/mutect_vcf/{sample}_somatic.vcf.gz.tbi",
+        stats = OUT_DIR + "/mutect_vcf/{sample}_somatic.vcf.gz.stats"
+    params:
+        cluster    = "-q home -l nodes=1:ppn=6 -l walltime=24:00:00",
+        # Turn the list of scattered stats into "-stats file1 -stats file2 ..."
+        stats_args = lambda wildcards, input: " ".join(
+            "-stats {}".format(s) for s in input.stats
+        )
+    shell:
+        "{JAVA} -Xmx42G -jar {GATK4} "
+        "    GatherVcfs "
+        "    -R {REF} "
+        "    -I {input.vcf_list} "
+        "    -O {output.vcf}; "
+        "tabix -p vcf {output.vcf}; "
+        "{JAVA} -Xmx8G -jar {GATK4} "
+        "    MergeMutectStats "
+        "    {params.stats_args} "
+        "    -O {output.stats}"
+
+
+rule filter_mutect:
+    input:
+        vcf   = OUT_DIR + "/mutect_vcf/{sample}_somatic.vcf.gz",
+        stats = OUT_DIR + "/mutect_vcf/{sample}_somatic.vcf.gz.stats"
+    output:
+        vcf = OUT_DIR + "/mutect_filter_vcf/{sample}_somatic.vcf.gz"
+    params:
+        cluster = "-q home -l nodes=1:ppn=8 -l walltime=24:00:00"
+    shell:
+        "{JAVA} -Xmx56G -jar {GATK4} "
+        "    FilterMutectCalls "
+        "    -V {input.vcf} "
+        "    -R {REF}"
+        "    --stats {input.stats} "
+        "    -O {output.vcf} "
+
+
+#run strelka2
+rule run_strelka:
+    input:
+        tumor = lambda wildcards: TUMOR_DICT[wildcards.sample][1],
+        normal = lambda wildcards: NORMAL_DICT[wildcards.sample][1],
+        ref = REF,
+        bed = SCRATCH_DIR + "/intervals_bed/{interval}.bed.gz"
+    output:
+        SCRATCH_DIR + "/strelka_analysis/{sample}/{interval}/results/"\
+          "variants/somatic.indels.vcf.gz",
+        SCRATCH_DIR + "/strelka_analysis/{sample}/{interval}/results/"\
+          "variants/somatic.snvs.vcf.gz"
+    benchmark:
+        OUT_DIR + "/benchmarks/strelka/{sample}/{interval}_strelka.txt"
+    threads: 12
+    params:
+        cluster = "-q home -l nodes=1:ppn=12 -l walltime=18:00:00",
+        run_dir = SCRATCH_DIR + "/strelka_analysis/{sample}/{interval}"
+    shell:
+        "{PYTHON2} {STRELKA} "
+        "    --tumorBam={input.tumor} "
+        "    --normalBam={input.normal} "
+        "    --referenceFasta={input.ref} "
+        "    --callRegions={input.bed} "
+        "    --runDir {params.run_dir};"
+        "{PYTHON2} "
+        "    {params.run_dir}/runWorkflow.py "
+        "    --mode local "
+        "    -j {threads} "
+        "    --quiet"
+
+#put all paths together in a file for each sample
+rule vcf_list_strelka:
+    input:
+        expand(SCRATCH_DIR + "/strelka_analysis/{{sample}}/{interval}/results/"\
+          "variants/somatic.indels.vcf.gz", interval=INTERVALS),
+        expand(SCRATCH_DIR + "/strelka_analysis/{{sample}}/{interval}/results/"\
+          "variants/somatic.snvs.vcf.gz", interval=INTERVALS)
+    output:
+        SCRATCH_DIR + "/strelka_vcf_list/{sample}_vcf.list"
+    params:
+        cluster = "-q home -l nodes=1:ppn=2 -l walltime=12:00:00"
+    run:
+        f = open(output[0], "w")
+        for path in input:
+            f.write(path + "\n")
+        f.close()
+
+#merge all interval vcfs together for each sample
+rule merge_vcfs_strelka:
+    input:
+        SCRATCH_DIR + "/strelka_vcf_list/{sample}_vcf.list"
+    output:
+        vcf = OUT_DIR + "/strelka_vcf/{sample}_somatic.vcf.gz",
+        tbi = OUT_DIR + "/strelka_vcf/{sample}_somatic.vcf.gz.tbi"
+    params:
+        cluster = "-q home -l nodes=1:ppn=8 -l walltime=48:00:00",
+    shell:
+        "{JAVA} -Xmx56G -jar {GATK4} "
+        "    MergeVcfs "        
+        "    -I {input} "
+        "    -O {output.vcf};"
+
+

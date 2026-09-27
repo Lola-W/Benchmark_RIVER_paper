@@ -1,0 +1,13 @@
+diff --git a/src/cn/edu/pku/cbi/mosaichunter/filter/MisalignedReadsFilter.java b/src/cn/edu/pku/cbi/mosaichunter/filter/MisalignedReadsFilter.java
+index 3f2a7c0..2df467a
+--- a/src/cn/edu/pku/cbi/mosaichunter/filter/MisalignedReadsFilter.java
++++ b/src/cn/edu/pku/cbi/mosaichunter/filter/MisalignedReadsFilter.java
+@@ -332,7 +332,7 @@ public class MisalignedReadsFilter extends BaseFilter {
+     private int runBlat() throws IOException, InterruptedException {
+         String blatCmd = getBlatCmd();
+         String cmd = blatCmd + " " + blatParam + " " + 
+-                referenceFile + " " + tmpInputFaFile + " " + tmpOutputPslFile;
++                referenceFile + " " + tmpInputFaFile + " " + tmpOutputPslFile + " " + "-threads=12";
+         System.out.println("run blat: " + cmd);
+         Runtime rt = Runtime.getRuntime();
+         Process blat = rt.exec(cmd);

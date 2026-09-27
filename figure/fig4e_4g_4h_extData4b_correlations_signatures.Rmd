@@ -1,0 +1,879 @@
+---
+title: "benchmarking_figures"
+author: "dcha"
+date: "2026-08-24"
+output: html_document
+---
+
+### Finalized TSVs
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+source("../R/nature_biotech_ggplot.R")
+
+raw <- read_tsv("../raw_data/raw_duplex_pileup_newPTA_altge1.tsv")
+nogerm <- read_tsv("../raw_data/no_germline.no_blacklist.duplex_pileup_newPTA_altge1.tsv")
+filt <- read_tsv("../raw_data/no_unrelated.no_germline.no_blacklist.duplex_pileup_newPTA_altge1_unrel_lowci.tsv")
+
+```
+
+### fig 4
+```{r}
+library(dplyr)
+library(stringr)
+library(ggplot2)
+
+call_cols <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  "call_ppmSeq_singleton_HC",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+exist_cols <- c(
+  "is_existing_lower_ci_0001_ILLUMINA",
+  "is_existing_lower_ci_0001_DUPLEX_PPMSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_UDSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_NANOSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ",
+  "existing_any_PTA1_16"
+)
+
+
+exist_cols_full <- c(
+  "is_existing_lower_ci_0001_ILLUMINA",
+  "is_existing_lower_ci_0001_DUPLEX_PPMSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_UDSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_NANOSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ",
+  "existing_any_PTA1_16"
+)
+
+
+get_self_exist_cols <- function(callset) {
+  if (callset == "call_Illumina")
+    return("is_existing_lower_ci_0001_ILLUMINA")
+
+  if (callset %in% c("call_ppmSeq_multiread", "call_ppmSeq_singleton_HC"))
+    return("is_existing_lower_ci_0001_DUPLEX_PPMSEQ")
+
+  if (callset %in% c("call_UDSeq_multiread", "call_UDSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_UDSEQ")
+
+  if (callset %in% c("call_NanoSeq_multiread", "call_NanoSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_NANOSEQ")
+
+  if (callset %in% c("call_HiDEFseq_double_stranded", "call_HiDEFseq_single_stranded"))
+    return("is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ")
+
+  if (callset == "call_PTA_singleton")
+    return("existing_any_PTA1_16")
+
+  character(0)
+}
+
+call_levels <- stringr::str_replace(call_cols, "^call_", "")
+
+call_to_exist_prop <- lapply(call_cols, function(cc) {
+  df_call <- filt %>%
+    dplyr::filter(.data[[cc]] == 1)
+
+  if (nrow(df_call) == 0)
+    return(NULL)
+
+  self_cols <- get_self_exist_cols(cc)
+  other_exist_cols <- setdiff(exist_cols, self_cols)
+
+  other_n <- rowSums(
+    df_call[, other_exist_cols, drop = FALSE] == 1,
+    na.rm = TRUE
+  )
+
+  tibble(
+    callset = stringr::str_replace(cc, "^call_", ""),
+    overlap_class = dplyr::case_when(
+      other_n == 0 ~ "private",
+      other_n == 1 ~ "overlap_1",
+      other_n >= 2 ~ "overlap_ge_2"
+    )
+  )
+}) %>%
+  dplyr::bind_rows() %>%
+  dplyr::count(callset, overlap_class, name = "n") %>%
+  dplyr::group_by(callset) %>%
+  dplyr::mutate(prop = n / sum(n)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    callset = factor(callset, levels = rev(call_levels)),
+    overlap_class = factor(
+      overlap_class,
+      levels = c("overlap_ge_2", "overlap_1", "private")
+    )
+  )
+
+lab_df <- call_to_exist_prop %>%
+  dplyr::mutate(overlap_class = as.character(overlap_class)) %>%
+  dplyr::group_by(callset) %>%
+  dplyr::arrange(
+    match(overlap_class, c("private", "overlap_1", "overlap_ge_2")),
+    .by_group = TRUE
+  ) %>%
+  dplyr::mutate(
+    y_center = cumsum(prop) - prop / 2,
+    y_edge = cumsum(prop),
+    y_line = y_edge + 0.020,
+    y_label = y_edge + 0.035,
+    label = ifelse(
+      prop >= 0.042,
+      scales::percent(prop, accuracy = 0.1),
+      scales::percent(prop, accuracy = 0.01)
+    )
+  ) %>%
+  dplyr::ungroup()
+
+```
+
+### Fig 4d
+```{r fig4d, fig.width=7.2, fig.height=6.7, dpi=450}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+
+
+exist_cols <- exist_cols_full
+
+
+
+support_cols <- c(
+  setdiff(exist_cols,
+          c("existing_any_PTA1_16")
+))
+
+# ---- settings ----
+# map evidence col -> MAF col (adjust here if your column names differ)
+# 1) evidence col -> raw platform token (remove prefix only)
+platform_raw <- stringr::str_remove(support_cols, "^is_existing_lower_ci_0001_")
+
+# is_existing_lower_ci_0001_DUPLEX_PPMSEQ -> DUPLEX_PPMSEQ_VAF
+evidence_to_maf <- stats::setNames(
+  paste0(platform_raw, "_MAF"),
+  support_cols
+)
+
+# 3) pretty platform label for facets (remove prefix + optional DUPLEX_)
+pretty_plat <- function(x) {
+  stringr::str_remove(x, "^is_existing_lower_ci_0001_") %>%
+    stringr::str_remove("^DUPLEX_")
+}
+
+plats <- pretty_plat(support_cols)
+
+# ---- build long MAF table (only variants with evidence in that platform) ----
+maf_long <- bind_rows(lapply(support_cols, function(ec) {
+  maf_col <- evidence_to_maf[[ec]]
+  stopifnot(!is.null(maf_col))
+  if (!maf_col %in% colnames(filt)) stop(paste("Missing VAF column:", maf_col))
+
+  filt %>%
+    transmute(
+      platform = pretty_plat(ec),
+      maf = .data[[maf_col]],
+      has_evidence = .data[[ec]] == 1
+    ) %>%
+    filter(has_evidence, !is.na(maf))
+}), .id = NULL) %>%
+  select(-has_evidence)
+
+# ---- make vid once ----
+if (all(c("chr","pos","ref","alt") %in% colnames(filt))) {
+  filt <- filt %>% mutate(vid = paste(chr, pos, ref, alt, sep=":"))
+} else {
+  filt <- filt %>% mutate(vid = row_number())
+}
+
+# ---- build long MAF table (only variants with evidence) ----
+maf_long <- bind_rows(lapply(support_cols, function(ec) {
+  maf_col <- evidence_to_maf[[ec]]
+  if (!maf_col %in% colnames(filt)) stop(paste("Missing VAF column:", maf_col))
+
+  filt %>%
+    transmute(
+      vid = vid,
+      platform = pretty_plat(ec),
+      maf = .data[[maf_col]],
+      has_evidence = .data[[ec]] == 1
+    ) %>%
+    filter(has_evidence, !is.na(maf))
+})) %>%
+  dplyr::select(-has_evidence)
+
+# ---- wide for pairwise (shared variants only; both platforms have evidence) ----
+maf_wide <- maf_long %>%
+  mutate(platform = factor(platform, levels = plats)) %>%
+  tidyr::pivot_wider(names_from = platform, values_from = maf)
+
+# ---- build all ordered pairs (x,y), drop self ----
+pairs <- expand.grid(
+  x = plats,
+  y = plats,
+  stringsAsFactors = FALSE
+) %>%
+  filter(x != y) %>%
+  as_tibble()
+
+# ---- collect pairwise points + stats ----
+pair_df <- bind_rows(lapply(seq_len(nrow(pairs)), function(i) {
+  x <- pairs$x[i]
+  y <- pairs$y[i]
+
+  d <- maf_wide %>%
+    select(vid, all_of(c(x, y))) %>%
+    rename(x_maf = !!x, y_maf = !!y) %>%
+    filter(!is.na(x_maf), !is.na(y_maf))
+
+  n <- nrow(d)
+  if (n >= 3) {
+    ct <- suppressWarnings(cor.test(d$x_maf, d$y_maf, method = "pearson"))
+    r <- unname(ct$estimate)
+    p <- ct$p.value
+  } else {
+    r <- NA_real_
+    p <- NA_real_
+  }
+
+  d %>%
+    mutate(
+      x_plat = x,
+      y_plat = y,
+      n = n,
+      r = r,
+      p = p
+    )
+}))
+
+# Adjust once across unique unordered method pairs, then share the same FDR
+# values between the scatterplot, correlation heatmap, and bubble plots.
+# Pearson r and raw p are calculated on original VAF, not sqrt(VAF).
+corr_levels <- plats
+corr_ordered <- pair_df %>%
+  dplyr::distinct(x_plat, y_plat, n, r, p) %>%
+  dplyr::mutate(
+    x_index = match(x_plat, corr_levels),
+    y_index = match(y_plat, corr_levels)
+  )
+
+corr_unique <- corr_ordered %>%
+  dplyr::filter(x_index < y_index)
+
+stopifnot(nrow(corr_ordered) == 20L, nrow(corr_unique) == 10L)
+
+corr_unique <- corr_unique %>%
+  dplyr::mutate(
+    q = stats::p.adjust(p, method = "BH"),
+    stars = dplyr::case_when(
+      !is.na(q) & q < 0.001 ~ "***",
+      !is.na(q) & q < 0.01 ~ "**",
+      !is.na(q) & q < 0.05 ~ "*",
+      TRUE ~ ""
+    )
+  )
+
+corr_pair_stats <- corr_ordered %>%
+  dplyr::mutate(
+    pair_x_index = pmin(x_index, y_index),
+    pair_y_index = pmax(x_index, y_index)
+  ) %>%
+  dplyr::left_join(
+    corr_unique %>%
+      dplyr::transmute(
+        pair_x_index = x_index,
+        pair_y_index = y_index,
+        q,
+        stars
+      ),
+    by = c("pair_x_index", "pair_y_index")
+  )
+
+# Text labels per facet (one row each); mirrored facets share one FDR.
+lab_df <- corr_pair_stats %>%
+  mutate(
+    label = paste0(
+      "n=", n,
+      "\nr=", ifelse(is.na(r), "NA", sprintf("%.3f", r)),
+      "\nFDR=", ifelse(is.na(q), "NA", format(q, digits = 2, scientific = TRUE))
+    ),
+    x_pos = sqrt(0.29),
+    y_pos = sqrt(0.29)
+  )
+
+pair_df <- pair_df %>%
+  mutate(
+    x_plat = factor(x_plat, levels = plats),
+    y_plat = factor(y_plat, levels = plats)
+  )
+
+lab_df <- lab_df %>%
+  mutate(
+    x_plat = factor(x_plat, levels = plats),
+    y_plat = factor(y_plat, levels = plats)
+  )
+
+
+# Match Fig. 5g: sqrt coordinates, but tick labels retain original VAF units.
+vaf_axis_breaks <- c(0, 0.01, 0.05, 0.1, 0.2, 0.3)
+p_fig4d_pairwise <- ggplot(pair_df, aes(x = sqrt(x_maf), y = sqrt(y_maf))) +
+  geom_point(size = 0.6, alpha = 0.75) +
+  geom_abline(slope = 1, intercept = 0, linetype = 2) +
+  geom_label(
+    data = lab_df,
+    aes(x = x_pos, y = y_pos, label = label),
+    inherit.aes = FALSE,
+    hjust = 1, vjust = 1,
+    size = 7 / ggplot2::.pt,
+    family = "Arial",
+    fill = "white",
+    linewidth = 0,
+    label.padding = grid::unit(0.05, "lines"),
+    label.r = grid::unit(0, "lines")
+  ) +
+  facet_grid(
+    y_plat ~ x_plat,
+    drop = FALSE,
+    labeller = ggplot2::labeller(
+      x_plat = normalize_seq_method,
+      y_plat = normalize_seq_method
+    )
+  ) +
+  scale_x_continuous(
+    limits = c(0, sqrt(0.3)),
+    breaks = sqrt(vaf_axis_breaks),
+    labels = as.character(vaf_axis_breaks)
+  ) +
+  scale_y_continuous(
+    limits = c(0, sqrt(0.3)),
+    breaks = sqrt(vaf_axis_breaks),
+    labels = as.character(vaf_axis_breaks)
+  ) +
+  coord_fixed() +
+  theme_classic(base_size = 12) +
+  theme(
+    strip.background = element_blank(),
+    panel.spacing = unit(0.8, "lines")
+  ) +
+  labs(
+    x = "sqrt(VAF) (x platform)",
+    y = "sqrt(VAF) (y platform)",
+    caption = paste0(
+      "Pearson r and tests use original VAF; FDR is BH-adjusted across 10 unique method pairs.\n",
+      "Axes use sqrt(VAF); tick labels show original VAF. FDR = 0 denotes numerical underflow."
+    )
+  ) +
+  theme_nbt(base_size = 7)
+
+p_fig4d_pairwise
+```
+
+### Fig 4e
+```{r fig4e, fig.width=7.2, fig.height=5.6, dpi=450}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+
+# Reuse the FDR values already calculated across 10 unique pairs in Fig. 4d.
+corr_plot <- corr_pair_stats %>%
+  dplyr::mutate(
+    x_plat = factor(x_plat, levels = corr_levels),
+    y_plat = factor(y_plat, levels = rev(corr_levels)),
+    star_label = stars,
+    text_colour = ifelse(!is.na(r) & r >= 0.72, "white", "black")
+  )
+
+corr_axis_labels <- function(x) {
+  labels <- normalize_seq_method(x)
+  labels[labels == "Illumina"] <- "IlluminaSeq"
+  labels
+}
+
+ggplot(corr_plot, aes(x = x_plat, y = y_plat, fill = r)) +
+  geom_tile(color = "grey85", linewidth = 0.4) +
+  geom_text(
+    data = corr_plot %>% dplyr::filter(star_label != ""),
+    aes(label = star_label, colour = text_colour),
+    size = 5.5 / ggplot2::.pt,
+    family = "Arial",
+    fontface = "bold",
+    hjust = 0.5,
+    vjust = 0.5
+  ) +
+  coord_fixed() +
+  theme_classic(base_size = 14) +
+  theme(
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  scale_x_discrete(labels = corr_axis_labels) +
+  scale_y_discrete(labels = corr_axis_labels) +
+  scale_colour_identity() +
+  scale_fill_gradientn(
+    colours = c("#FFFFFF", "#D9EAF7", "#6BAED6", "#2171B5", "#08306B"),
+    values = c(0, 0.5, 0.75, 0.9, 1),
+    limits = c(0, 1),
+    breaks = c(0, 0.5, 1)
+  ) +
+  labs(
+    fill = "Pearson r",
+    caption = paste0(
+      "Pearson r across variants shared by each method pair; two-sided tests with Benjamini-Hochberg\n",
+      "adjustment across 10 unique method pairs. *q < 0.05; **q < 0.01; ***q < 0.001."
+    )
+  ) +
+  theme_nbt(base_size = 7)
+```
+
+### Fig 4d Pearson correlation bubble matrix
+```{r fig4d_bubble, fig.width=7.2, fig.height=5.6, dpi=450}
+# q = 0 can occur through numerical underflow for extremely small P values.
+# Floor it only for the visual size transformation so every bubble is finite.
+fdr_floor <- 1e-300
+
+corr_bubble_df <- corr_plot %>%
+  dplyr::mutate(
+    neg_log10_fdr = -log10(pmax(q, fdr_floor)),
+    is_significant = !is.na(q) & q < 0.05
+  )
+
+correlation_colours <- c(
+  "#FFFFFF", "#D9EAF7", "#6BAED6", "#2171B5", "#08306B"
+)
+
+make_corr_bubble_plot <- function(data, method_order, caption_text) {
+  plot_data <- data %>%
+    dplyr::mutate(
+      x_plat = factor(as.character(x_plat), levels = method_order),
+      y_plat = factor(as.character(y_plat), levels = rev(method_order))
+    )
+
+  tile_data <- tidyr::expand_grid(
+    x_plat = factor(method_order, levels = method_order),
+    y_plat = factor(method_order, levels = rev(method_order))
+  )
+
+  ggplot() +
+    geom_tile(
+      data = tile_data,
+      aes(x = x_plat, y = y_plat),
+      fill = "white",
+      color = "grey85",
+      linewidth = 0.4
+    ) +
+    geom_point(
+      data = plot_data %>% dplyr::filter(!is_significant),
+      aes(x = x_plat, y = y_plat, size = neg_log10_fdr, fill = r),
+      shape = 21,
+      color = "grey65",
+      stroke = 0.25,
+      show.legend = FALSE
+    ) +
+    geom_point(
+      data = plot_data %>% dplyr::filter(is_significant),
+      aes(x = x_plat, y = y_plat, size = neg_log10_fdr, fill = r),
+      shape = 21,
+      color = "black",
+      stroke = 1,
+      show.legend = TRUE
+    ) +
+    scale_fill_gradientn(
+      name = "Pearson's r",
+      colours = correlation_colours,
+      values = c(0, 0.5, 0.75, 0.9, 1),
+      limits = c(0, 1),
+      breaks = c(0, 0.5, 1)
+    ) +
+    scale_size_continuous(
+      name = expression(-log[10](FDR)),
+      range = c(3, 11),
+      limits = c(0, 300),
+      breaks = c(1, 10, 100, 300)
+    ) +
+    scale_x_discrete(labels = corr_axis_labels, expand = c(0, 0)) +
+    scale_y_discrete(labels = corr_axis_labels, expand = c(0, 0)) +
+    coord_fixed() +
+    guides(
+      fill = guide_colorbar(
+        order = 1,
+        title.position = "top",
+        title.hjust = 0,
+        barheight = grid::unit(25, "mm"),
+        barwidth = grid::unit(3, "mm")
+      ),
+      size = guide_legend(
+        order = 2,
+        title.position = "top",
+        title.hjust = 0,
+        override.aes = list(
+          shape = 21,
+          fill = "grey80",
+          color = "black",
+          stroke = 0.5
+        )
+      )
+    ) +
+    labs(caption = caption_text) +
+    theme_classic(base_size = 14) +
+    theme(
+      axis.title = element_blank(),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      legend.position = "right",
+      legend.box = "vertical",
+      legend.title = element_text(family = "Arial", size = 7),
+      legend.text = element_text(family = "Arial", size = 7)
+    ) +
+    theme_nbt(base_size = 7)
+}
+
+bubble_caption <- paste0(
+  "Bubble size represents -log10(Benjamini-Hochberg FDR); bold outlines indicate FDR < 0.05.\n",
+  "FDR values reported as 0 through numerical underflow are plotted as 1e-300."
+)
+
+p_fig4d_bubble <- make_corr_bubble_plot(
+  corr_bubble_df,
+  method_order = corr_levels,
+  caption_text = bubble_caption
+)
+
+p_fig4d_bubble
+```
+
+### Fig 4d Pearson correlation bubble matrix with dendrogram
+```{r fig4d_bubble_dendrogram, fig.width=7.2, fig.height=6.5, dpi=450}
+# Build a symmetric Pearson correlation matrix, then cluster with distance = 1-r.
+corr_matrix <- matrix(
+  NA_real_,
+  nrow = length(corr_levels),
+  ncol = length(corr_levels),
+  dimnames = list(corr_levels, corr_levels)
+)
+diag(corr_matrix) <- 1
+
+for (i in seq_len(nrow(corr_unique))) {
+  x_method <- corr_unique$x_plat[i]
+  y_method <- corr_unique$y_plat[i]
+  corr_matrix[x_method, y_method] <- corr_unique$r[i]
+  corr_matrix[y_method, x_method] <- corr_unique$r[i]
+}
+
+pearson_distance_matrix <- 1 - corr_matrix
+pearson_distance_matrix[pearson_distance_matrix < 0] <- 0
+pearson_distance <- stats::as.dist(pearson_distance_matrix)
+corr_hclust <- stats::hclust(pearson_distance, method = "average")
+clustered_method_order <- corr_hclust$labels[corr_hclust$order]
+
+dendrogram_data <- ggdendro::dendro_data(
+  stats::as.dendrogram(corr_hclust),
+  type = "rectangle"
+)
+
+p_corr_dendrogram <- ggplot(
+  ggdendro::segment(dendrogram_data)
+) +
+  geom_segment(
+    aes(x = x, y = y, xend = xend, yend = yend),
+    color = "black",
+    linewidth = 0.45,
+    lineend = "square"
+  ) +
+  scale_x_continuous(
+    limits = c(0.5, length(clustered_method_order) + 0.5),
+    expand = c(0, 0)
+  ) +
+  scale_y_continuous(expand = expansion(mult = c(0, 0.05))) +
+  theme_void() +
+  theme(plot.margin = margin(5.5, 5.5, 0, 5.5))
+
+clustered_caption <- paste0(
+  bubble_caption,
+  " Hierarchical clustering uses average linkage on Pearson distance (1-r)."
+)
+
+p_corr_bubble_clustered <- make_corr_bubble_plot(
+  corr_bubble_df,
+  method_order = clustered_method_order,
+  caption_text = clustered_caption
+) +
+  theme(plot.margin = margin(0, 5.5, 5.5, 5.5))
+
+p_fig4d_bubble_dendrogram <- patchwork::wrap_plots(
+  p_corr_dendrogram,
+  p_corr_bubble_clustered,
+  ncol = 1,
+  heights = c(0.24, 1)
+)
+
+p_fig4d_bubble_dendrogram
+```
+
+### Mutational signature prep for "BAM-evidence"
+```{r}
+mutSig_bamEvidence<-read_tsv("../raw_data/bamEvidence_sig_denovo.tsv")
+cosmic_refit_mutSig_bamEvidence<-read_tsv("../raw_data/bamEvidence_sig_cosmic_refit.tsv")
+bamEvidence_trinuc <- read_tsv("../raw_data/bamEvidence_trinuc.tsv")
+sig_bamEvidence_trinuc <- read_tsv("../raw_data/SBS96_bamEvidence_sig.tsv")
+```
+
+### fig 4f-2
+```{r fig4f, fig.width=7.2, fig.height=5.2, dpi=450}
+## ---- BAM Evidence: bubble (SigA-E vs COSMIC) ----
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+
+
+# ---- rename map: SBS96A->SigA ... SBS96E->SigE ----
+denovo_map_bam <- c(
+  "Signature 96-SBS96A" = "SigA",
+  "Signature 96-SBS96B" = "SigB",
+  "Signature 96-SBS96C" = "SigC",
+  "Signature 96-SBS96D" = "SigD",
+  "Signature 96-SBS96E" = "SigE",
+  "SBS96A" = "SigA",
+  "SBS96B" = "SigB",
+  "SBS96C" = "SigC",
+  "SBS96D" = "SigD",
+  "SBS96E" = "SigE"
+)
+
+# ---- COSMIC colors (reuse overlaps; add new) ----
+cosmic_cols_bam <- c(
+  SBS1  = "#A8DADC",
+  SBS2  = "#F4A261",
+  SBS3  = "#BFD3E6",
+  SBS4  = "#C7E9C0",
+  SBS5  = "#8EC9B8",
+  SBS12 = "#FDD0A2",
+  SBS16 = "#B8A1D9",
+  SBS31 = "#F6BD60",
+  SBS32 = "#9DB4E0",
+  SBS51 = "#D9D9D9"
+
+  # new in BAM
+
+)
+
+# ---- parse refit table into long df ----
+df_cosmic_refit_mutSig_bamEvidence <- cosmic_refit_mutSig_bamEvidence %>%
+  transmute(
+    denovo_raw = `De novo extracted`,
+    mix_raw = `Global NMF Signatures`
+  ) %>%
+  mutate(
+    denovo = recode(denovo_raw, !!!denovo_map_bam, .default = denovo_raw),
+    mix_raw = str_replace_all(mix_raw, "\\s*&\\s*", "&"),
+    parts = str_split(mix_raw, "&", simplify = FALSE)
+  ) %>%
+  tidyr::unnest_longer(parts) %>%
+  mutate(
+    parts = str_trim(parts),
+    cosmic = str_extract(parts, "SBS\\d+"),
+    pct = as.numeric(str_match(parts, "\\(([-0-9.]+)%\\)")[,2])
+  ) %>%
+  filter(!is.na(cosmic), !is.na(pct)) %>%
+  select(denovo, cosmic, pct)
+
+y_levels_bam <- c("SigA","SigB","SigC","SigD","SigE")
+x_levels_bam <- names(cosmic_cols_bam)
+
+p1_bam <- ggplot(
+  df_cosmic_refit_mutSig_bamEvidence %>%
+    mutate(
+      cosmic = factor(cosmic, levels = x_levels_bam),
+      denovo = factor(denovo, levels = y_levels_bam)
+    )
+) +
+  geom_point(
+    aes(x = cosmic, y = denovo, size = pct, fill = cosmic),
+    shape = 21,
+    color = "grey20",
+    stroke = 0.55
+  ) +
+  geom_text(
+    aes(x = cosmic, y = denovo, label = sprintf("%.1f%%", pct)),
+    size = 7 / ggplot2::.pt,
+    family = "Arial",
+    fontface = "bold",
+    lineheight = 0.9
+  ) +
+  scale_fill_manual(values = cosmic_cols_bam, name = "COSMIC") +
+  scale_size(
+    range = c(9, 18),
+    breaks = c(10, 25, 50, 75),
+    name = "Contribution (%)"
+  ) +
+  scale_y_discrete(limits = rev(levels(factor(y_levels_bam)))) +
+  coord_cartesian(clip = "off") +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.major = element_line(color = "grey92", linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    axis.ticks = element_blank(),
+    legend.title = element_text(face = "bold"),
+    legend.position = "right"
+  ) +
+  theme_nbt(base_size = 7)
+
+p1_bam
+
+```
+
+
+### Fig 4g
+```{r fig4g, fig.width=7.2, fig.height=5.9, dpi=450}
+
+## ---- BAM Evidence: sample-sample cosine similarity heatmap (96D) ----
+library(dplyr)
+library(tibble)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+
+
+# ---- matrix: rows = 96 contexts, cols = samples ----
+mat_96_bam <- bamEvidence_trinuc %>%
+  as.data.frame() %>%
+  column_to_rownames("MutationType") %>%
+  as.matrix()
+
+# ---- cosine similarity between samples (columns) ----
+cos_sim_cols <- function(m){
+  m_scaled <- apply(m, 2, function(x){
+    s2 <- sum(x^2)
+    if (s2 == 0) return(rep(0, length(x)))
+    x / sqrt(s2)
+  })
+  t(m_scaled) %*% m_scaled
+}
+
+sim_96_bam <- cos_sim_cols(mat_96_bam)
+
+# ---- cosine distance + clustering ----
+dist_96_bam <- 1 - sim_96_bam
+dist_96_bam[dist_96_bam < 0] <- 0
+diag(dist_96_bam) <- 0
+hc_96_bam <- hclust(as.dist(dist_96_bam), method = "average")
+
+# ---- color (0-1) ----
+col_fun_blue <- colorRamp2(
+  c(0, 0.5, 0.75, 0.9, 1),
+  c("#FFFFFF", "#E3EEF9", "#9ECAE1", "#2171B5", "#08306B")
+)
+
+ht_bam <- Heatmap(
+  sim_96_bam,
+  name = "Cosine\nSimilarity",
+  col = col_fun_blue,
+  cluster_rows = as.dendrogram(hc_96_bam),
+  cluster_columns = as.dendrogram(hc_96_bam),
+  show_row_dend = FALSE,
+  column_dend_height = unit(30, "mm"),
+  row_names_side = "left",
+  row_labels = normalize_seq_method(rownames(sim_96_bam)),
+  column_labels = normalize_seq_method(colnames(sim_96_bam)),
+  row_names_gp = gpar(fontfamily = "Arial", fontsize = 7),
+  column_names_gp = gpar(fontfamily = "Arial", fontsize = 7),
+  column_names_rot = 45,
+  heatmap_legend_param = list(
+    at = c(0, 0.5, 0.75, 0.9, 1),
+    labels = c("0", "0.5", "0.75", "0.9", "1"),
+    title = "Cosine similarity",
+    title_gp = gpar(fontfamily = "Arial", fontsize = 7),
+    labels_gp = gpar(fontfamily = "Arial", fontsize = 7)
+  )
+)
+
+draw(ht_bam)
+```
+
+### fig 4h
+
+```{r fig4h, fig.width=7.2, fig.height=5.0, dpi=450}
+library(dplyr)
+library(tibble)
+library(ComplexHeatmap)
+library(circlize)
+library(grid)
+
+
+# ---- matrix: rows = sig, cols = sample ----
+mat_raw_bam <- mutSig_bamEvidence %>%
+  as.data.frame() %>%
+  column_to_rownames("Samples") %>%
+  t()
+
+rownames(mat_raw_bam) <- dplyr::recode(rownames(mat_raw_bam), !!!denovo_map_bam, .default = rownames(mat_raw_bam))
+
+# ---- relative activity (% within each sample) ----
+mat_sig_pct_bam <- apply(mat_raw_bam, 2, function(x){
+  s <- sum(x)
+  if (s == 0) return(rep(0, length(x)))
+  100 * x / s
+})
+mat_sig_pct_bam <- as.matrix(mat_sig_pct_bam)
+rownames(mat_sig_pct_bam) <- rownames(mat_raw_bam)  # SigA-E
+colnames(mat_sig_pct_bam) <- colnames(mat_raw_bam)  # Samples
+
+# ---- red-ish but not too aggressive ----
+col_fun_red <- colorRamp2(
+  c(0, 25, 50, 75, 100),
+  c("#FFFFFF", "#FDE0DD", "#FCAE91", "#FB6A4A", "#CB181D")
+)
+
+ht_sig_bam <- Heatmap(
+  mat_sig_pct_bam,
+  name = "Activity\n(%)",
+  col = col_fun_red,
+  cluster_rows = FALSE,
+  cluster_columns = as.dendrogram(hc_96_bam),
+  show_row_dend = FALSE,
+  column_dend_height = unit(30, "mm"),
+  row_names_side = "left",
+  column_labels = normalize_seq_method(colnames(mat_sig_pct_bam)),
+  row_names_gp = gpar(fontfamily = "Arial", fontsize = 7),
+  column_names_gp = gpar(fontfamily = "Arial", fontsize = 7),
+  column_names_rot = 90,
+  heatmap_legend_param = list(
+    at = c(0, 25, 50, 75, 100),
+    title = "Activity (%)",
+    title_gp = gpar(fontfamily = "Arial", fontsize = 7),
+    labels_gp = gpar(fontfamily = "Arial", fontsize = 7)
+  ),
+  cell_fun = function(j, i, x, y, w, h, fill){
+    grid.text(
+      sprintf("%.1f", mat_sig_pct_bam[i, j]),
+      x,
+      y,
+      gp = gpar(
+        fontfamily = "Arial",
+        fontsize = 7,
+        col = ifelse(mat_sig_pct_bam[i, j] >= 80, "white", "black")
+      )
+    )
+  }
+)
+
+draw(ht_sig_bam)
+
+```

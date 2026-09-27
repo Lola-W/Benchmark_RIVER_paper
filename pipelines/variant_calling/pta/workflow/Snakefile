@@ -1,0 +1,65 @@
+configfile: "../config/config.yaml"
+
+import os
+import re
+from glob import glob
+
+samples = glob_wildcards("../input/{sample}.sc.bam").sample 
+
+rule all: 
+    input:
+        expand("../output/{sample}/both/{sample}/somatic_genotypes.rda", sample=samples)
+
+rule createDir: 
+    input:
+        sc=os.path.abspath("../input/{sample}.sc.bam"),
+        bulk=os.path.abspath("../input/bulk.bam")
+    output:
+        os.path.abspath("../output/{sample}/scan.yaml"),
+    params: 
+        reference = os.path.abspath(config["reference"]),
+        dbsnp = os.path.abspath(config["dbsnp"]),
+        refpanel = os.path.abspath(config["shapeit_refpanel"]),
+        dir = os.path.abspath("../output")
+    log:
+        os.path.abspath("../logs/{sample}/{sample}_create_dir.log")
+    conda:
+        "envs/SCAN2.yaml"
+    shell: 
+        "mkdir -p {params.dir} && "
+        "cd {params.dir} && "
+        "scan2 -d {wildcards.sample} init && "
+        "cd {wildcards.sample} && "
+        "scan2 config --verbose "
+        "--ref {params.reference} "
+        "--dbsnp {params.dbsnp} "
+        "--shapeit-refpanel {params.refpanel} "
+        "--abmodel-chunks=1 "
+        "--abmodel-samples-per-chunk=100 "
+        "--abmodel-steps=1 "
+        "--callable-regions True "
+        "--score-all-sites "
+        "--bulk-bam {input.bulk} "
+        "--sc-bam {input.sc} 2> {log} && " 
+        "scan2 validate "
+    
+rule runSCAN: 
+    input: 
+        os.path.abspath("../output/{sample}/scan.yaml")
+    output: 
+        "../output/{sample}/both/{sample}/somatic_genotypes.rda",
+        "../output/{sample}/callable_regions/{sample}/callable_regions.rda",
+    params:
+        cluster = "-q home -l nodes=1:ppn=24 -l walltime=10:00:00",
+        dir = os.path.abspath("../output/{sample}"),
+    resources:
+        walltime=300,
+        mem_mb=64000
+    threads: 24
+    conda:
+        "envs/SCAN2.yaml"
+    log: 
+        os.path.abspath("../logs/{sample}.log")
+    shell: 
+        "cd {params.dir} && "
+        "scan2 run --joblimit 24 2>{log}" 

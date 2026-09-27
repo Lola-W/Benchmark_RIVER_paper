@@ -1,0 +1,23 @@
+# Output
+out_dir: ./results
+
+samples_tsv: ./samples.tsv
+
+# Tools
+java: java
+mosaichunter_jar: ../../software/MosaicHunter/build/mosaichunter.jar
+
+# References
+ref_fasta: ../../resources/GRCh38_full_analysis_set_plus_decoy_hla.fa
+dbsnp_vcf: ../../resources/dbsnp_146.hg38.vcf.gz
+repeat_bed: ../../resources/allrepeats_MF_combining_trf_hg38.bed
+error_prone_bed: ../../resources/WGS.error_prone.hg38_liftover.sorted.bed
+indel_bed: ../../resources/indel_hg38_liftover.sorted_merged.bed
+
+# Chunking
+total_chunks: 60
+
+# Resources
+threads_per_job: 12
+mem_gb_thread: 6
+

@@ -1,0 +1,11 @@
+input_files: ./samples.tsv
+n_intervals: 107
+out_dir: ./results
+scratch_dir: ./results/scratch
+strelka_path: ../../software/strelka-2.9.10/bin/configureStrelkaSomaticWorkflow.py
+gatk4: ../../software/gatk-4.6.2.0/gatk-package-4.6.2.0-local.jar
+python2: python2
+java: java
+bed_file: ../../resources/Homo_sapiens_assembly38.bed
+ref_fasta: ../../resources/GRCh38_full_analysis_set_plus_decoy_hla.fa
+gnomad_af: ../../resources/af-only-gnomad.hg38.vcf.gz

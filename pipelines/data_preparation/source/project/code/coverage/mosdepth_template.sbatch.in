@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#SBATCH -J mosdepth_{{PLATFORM}}
+# Set site-specific scheduler options in the submitting environment.
+# Set site-specific scheduler options in the submitting environment.
+# Set site-specific scheduler options in the submitting environment.
+#SBATCH --cpus-per-task={{CPUS}}
+#SBATCH --mem={{MEM}}
+#SBATCH -t {{TIME}}
+#SBATCH -o {{WORKDIR}}/slurm-%j.out
+#SBATCH -e {{WORKDIR}}/slurm-%j.err
+
+set -euo pipefail
+# Activate the required software environment before submission.
+
+
+# For CRAM inputs (ppmseq), point htslib to the reference
+export CRAM_REFERENCE="{{FASTA}}"
+
+# Keep only autosomes + X
+CONTIG_RE='^chr([1-9]|1[0-9]|2[0-2]|X)$'
+
+"{{RUNNER}}" \
+  -b "{{BAM}}" \
+  -l "{{BLACKLIST}}" \
+  -o "{{OUTDIR}}" \
+  -p "{{PREFIX}}" \
+  -t {{CPUS}} \
+  -q {{MAPQ}} \
+  -F {{EXCL_FLAG}} \
+  -T "{{THRESHOLDS}}" \
+  -r "${CONTIG_RE}"

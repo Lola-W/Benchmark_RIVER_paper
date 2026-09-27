@@ -1,0 +1,7 @@
+# hg38 configuration of the shared study workflow.
+# All resources, single-cell BAMs, and bulk BAM must use the same assembly.
+reference: ../../resources/Homo_sapiens_assembly38.fasta
+dbsnp: ../../resources/common_all_20180418.vcf
+# This wrapper calls SHAPEIT. Supply a GRCh38 SHAPEIT-format reference panel.
+# An Eagle panel cannot be substituted for this directory.
+shapeit_refpanel: ../../resources/GRCh38_SHAPEIT_reference_panel

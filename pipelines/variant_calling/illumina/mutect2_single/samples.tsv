@@ -1,0 +1,2 @@
+#sample	tumor/normal	bam_path
+7614_300x	tumor	../../inputs/7614_illumina_brain_somatic.bam

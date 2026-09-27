@@ -1,0 +1,6652 @@
+---
+title: "bench"
+author: "DoHyeonCha"
+date: "2026-02-23"
+output: html_document
+---
+
+
+```{r}
+library(readr)
+library(dplyr)
+
+# Input
+ampli <- read_tsv("chung_ampli_hg19.snv.hg38.tsv", show_col_types = FALSE)
+validated <- read_tsv("validated_chung.tsv", show_col_types = FALSE)
+
+# Variants validated in all three: CTX, L, T
+blt_keys <- validated %>%
+  dplyr::filter(CTX == 1, L == 1, T == 1) %>%
+  pull(variant_list) %>%
+  unique()
+
+# Add BLT_validated column to ampli table
+ampli_out <- ampli %>%
+  mutate(BLT_validated = if_else(HG19_KEY %in% blt_keys, 1L, 0L))
+
+# Save
+write_tsv(ampli_out, "chung_ampli_hg19.snv.hg38.with_BLT_validated.tsv")
+
+```
+
+
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+
+#raw_old<- read_tsv("raw_duplex_pileup.tsv")
+#nogerm_old<-read_tsv("no_germline.no_blacklist.duplex_pileup.tsv")
+filt_old <- read_tsv("no_unrelated.no_germline.no_blacklist.duplex_pileup.tsv")
+
+#ext_pileup <- read_tsv("raw_duplex_pileup_extended.tsv")
+```
+
+```{r}
+ 
+pta_cols <- raw %>% colnames(.) %>% .[str_detect(., "PTA")]
+
+
+unrel_cols <- raw %>% colnames(.) %>% .[str_detect(.,"unrelated")]
+
+raw_pta_unrel <-  raw %>% dplyr::select(c("chr","pos","ref", "alt", pta_cols, unrel_cols))
+```
+
+
+
+```{r}
+alt_pta_cols <- ext_pileup %>% colnames(.) %>% .[str_detect(., "PTA")] %>% .[str_detect(., "ALT_COUNT")]
+
+ext_pileup_pta_only <- ext_pileup %>% dplyr::select(c("chr","pos","ref", "alt", alt_pta_cols))
+```
+
+```{r}
+
+ext_pileup_pta_only %>% dplyr::select(c("chr","pos","ref", "alt"))
+raw_pta_unrel %>% dplyr::select(c("chr","pos","ref", "alt"))
+                   
+```
+
+
+```{r}
+library(dplyr)
+library(stringr)
+
+# --------------------------------------------------
+# PTA single-neuron ALT count columns (01-16 only)
+# --------------------------------------------------
+pta16_alt_cols <- ext_pileup %>%
+  colnames() %>%
+  .[str_detect(., "^PTA_SINGLE_NEURON_[0-9]{2}_ALT_COUNT$")] %>%
+  sort()
+
+stopifnot(length(pta16_alt_cols) == 16)
+
+# --------------------------------------------------
+# Recalculate PTA existence by ALT_COUNT >= 1
+# --------------------------------------------------
+pta_exist_mat <- ext_pileup %>%
+  dplyr::select(all_of(pta16_alt_cols)) %>%
+  as.data.frame()
+
+pta_exist_mat[is.na(pta_exist_mat)] <- 0
+
+pta_exist_bin <- pta_exist_mat >= 1
+pta_exist_n <- rowSums(pta_exist_bin)
+
+pta_exist_which <- apply(pta_exist_bin, 1, function(x) {
+  idx <- which(x)
+  if (length(idx) == 0) "." else paste(idx, collapse = ",")
+})
+
+# --------------------------------------------------
+# Overwrite / create the PTA BAM-level columns
+# --------------------------------------------------
+raw2 <- raw %>%
+  mutate(
+    existing_any_PTA1_16 = as.integer(pta_exist_n >= 1),
+    existing_any_PTA1_16_singleton = as.integer(pta_exist_n == 1),
+    existing_any_PTA1_16_multiple = as.integer(pta_exist_n >= 2),
+    existing_any_PTA1_16_number = as.integer(pta_exist_n),
+    existing_any_PTA1_16_which = pta_exist_which
+  )
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+
+# --------------------------------------------------
+# Unrelated PTA samples to be redefined by ALT_COUNT >= 1
+# --------------------------------------------------
+pta_unrel_map <- c(
+  "HG19_PTA_6566_1_ALT_COUNT" = "HG19_PTA_6566_1",
+  "HG19_PTA_6566_2_ALT_COUNT" = "HG19_PTA_6566_2",
+  "HG19_PTA_8420_1_ALT_COUNT" = "HG19_PTA_8420_1",
+  "HG19_PTA_8420_2_ALT_COUNT" = "HG19_PTA_8420_2"
+)
+
+stopifnot(all(names(pta_unrel_map) %in% colnames(ext_pileup)))
+
+pta_unrel_old_names <- unname(pta_unrel_map)
+
+# --------------------------------------------------
+# Helper: clean old unrelated list by removing PTA entries
+# --------------------------------------------------
+clean_unrelated_which <- function(x, remove_names) {
+  if (is.na(x) || x == "." || x == "") return(character(0))
+  toks <- strsplit(x, ",", fixed = TRUE)[[1]]
+  toks <- toks[toks != ""]
+  toks <- toks[!toks %in% remove_names]
+  toks
+}
+
+# --------------------------------------------------
+# Helper: derive platform names from final sample names
+# --------------------------------------------------
+to_platform <- function(x) {
+  if (length(x) == 0) return(character(0))
+  
+  out <- ifelse(
+    str_detect(x, "PTA"),
+    "PTA",
+    ifelse(
+      str_detect(x, "PPMSEQ"),
+      "PPMSEQ",
+      ifelse(
+        str_detect(x, "UDSEQ"),
+        "UDSEQ",
+        ifelse(
+          str_detect(x, "NANOSEQ"),
+          "NANOSEQ",
+          ifelse(
+            str_detect(x, "ILLUMINA"),
+            "ILLUMINA",
+            NA_character_
+          )
+        )
+      )
+    )
+  )
+  
+  unique(out[!is.na(out)])
+}
+
+# --------------------------------------------------
+# Rebuild unrelated fields
+# --------------------------------------------------
+new_unrelated_which <- vector("character", nrow(raw))
+
+for (i in seq_len(nrow(raw))) {
+  # old unrelated entries except PTA
+  base_tokens <- clean_unrelated_which(raw$existing_in_unrelated_which[i], pta_unrel_old_names)
+  
+  # newly defined PTA unrelated entries from ext_pileup ALT_COUNT >= 1
+  new_pta_tokens <- unname(
+    pta_unrel_map[
+      as.numeric(ext_pileup[i, names(pta_unrel_map), drop = TRUE]) >= 1
+    ]
+  )
+  
+  # merge and keep stable order:
+  # first old non-PTA tokens, then newly added PTA tokens
+  final_tokens <- unique(c(base_tokens, new_pta_tokens))
+  
+  new_unrelated_which[i] <- if (length(final_tokens) == 0) "." else paste(final_tokens, collapse = ",")
+}
+
+new_unrelated_platform <- vapply(new_unrelated_which, function(x) {
+  toks <- clean_unrelated_which(x, character(0))
+  plats <- to_platform(toks)
+  if (length(plats) == 0) "." else paste(plats, collapse = ",")
+}, character(1))
+
+new_unrelated_flag <- as.integer(new_unrelated_which != ".")
+
+# --------------------------------------------------
+# Overwrite/create columns
+# --------------------------------------------------
+raw3 <- raw2 %>%
+  mutate(
+    existing_in_unrelated = new_unrelated_flag,
+    existing_in_unrelated_platform = new_unrelated_platform,
+    existing_in_unrelated_which = new_unrelated_which
+  )
+
+```
+
+```{r}
+library(dplyr)
+
+pta_update_cols <- c(
+  "existing_any_PTA1_16",
+  "existing_any_PTA1_16_singleton",
+  "existing_any_PTA1_16_multiple",
+  "existing_any_PTA1_16_number",
+  "existing_any_PTA1_16_which",
+  "existing_in_unrelated",
+  "existing_in_unrelated_platform",
+  "existing_in_unrelated_which"
+)
+
+# Optional safety checks
+stopifnot(all(colnames(nogerm) == colnames(raw)))
+stopifnot(all(pta_update_cols %in% colnames(raw3)))
+
+# Build lookup table from raw3
+raw3_lookup <- raw3 %>%
+  dplyr::select(chr, pos, ref, alt, all_of(pta_update_cols))
+
+# Replace the PTA-related BAM evidence fields in nogerm
+nogerm3 <- nogerm %>%
+  dplyr::select(-all_of(pta_update_cols)) %>%
+  left_join(raw3_lookup, by = c("chr", "pos", "ref", "alt")) %>%
+  dplyr::select(all_of(colnames(nogerm)))
+
+# Safety checks
+stopifnot(nrow(nogerm3) == nrow(nogerm))
+stopifnot(all(colnames(nogerm3) == colnames(nogerm)))
+
+# Check whether any key failed to match
+n_unmatched <- nogerm3 %>%
+  filter(is.na(existing_any_PTA1_16)) %>%
+  nrow()
+
+cat("Unmatched rows in nogerm3:", n_unmatched, "\n")
+
+```
+
+```{r}
+library(dplyr)
+
+filt3 <- nogerm3 %>%
+  filter(existing_in_unrelated == 0)
+
+# checks
+cat("nrow(filt):", nrow(filt), "\n")
+cat("nrow(filt3):", nrow(filt3), "\n")
+
+filt3$existing_in_unrelated %>% table()
+
+```
+
+```{r}
+raw3 %>% write_tsv("raw_duplex_pileup_newPTA.tsv")
+nogerm3 %>% write_tsv("no_germline.no_blacklist.duplex_pileup_newPTA.tsv")
+filt3 %>% write_tsv("no_unrelated.no_germline.no_blacklist.duplex_pileup_newPTA.tsv")
+
+```
+
+```{r}
+library(readr)
+library(dplyr)
+
+# Read Chung amplicon table
+chung_ampli <- read_tsv("chung_ampli_hg19.snv.hg38.tsv", show_col_types = FALSE)
+
+# Build lookup table by hg19 key
+chung_key <- chung_ampli %>%
+  transmute(
+    chr = CHROM,
+    pos = POS,
+    ref = REF,
+    alt = ALT,
+    chung_ampli = CATEGORY
+  ) %>%
+  distinct(chr, pos, ref, alt, .keep_all = TRUE)
+
+# Safety check for duplicated keys in Chung table
+dup_chung <- chung_key %>%
+  count(chr, pos, ref, alt) %>%
+  filter(n > 1)
+
+cat("Duplicated keys in Chung table:", nrow(dup_chung), "\n")
+
+# Helper
+add_chung_ampli <- function(df, lookup) {
+  df %>%
+    left_join(lookup, by = c("chr", "pos", "ref", "alt")) %>%
+    mutate(chung_ampli = ifelse(is.na(chung_ampli), ".", chung_ampli)) %>%
+    relocate(chung_ampli, .after = last_col())
+}
+
+# Apply
+raw4 <- add_chung_ampli(raw, chung_key)
+nogerm4 <- add_chung_ampli(nogerm, chung_key)
+filt4 <- add_chung_ampli(filt, chung_key)
+
+# Quick summaries
+raw4$chung_ampli %>% table()
+nogerm4$chung_ampli %>% table()
+filt4$chung_ampli %>% table()
+
+# Optional sanity checks
+cat("ncol(raw)  ->", ncol(raw),  " / ncol(raw4)  ->", ncol(raw4),  "\n")
+cat("ncol(nogerm)->", ncol(nogerm)," / ncol(nogerm4)->", ncol(nogerm4), "\n")
+cat("ncol(filt) ->", ncol(filt), " / ncol(filt4) ->", ncol(filt4), "\n")
+
+```
+```{r}
+raw4 %>% write_tsv("raw_duplex_pileup_newPTA.tsv")
+nogerm4 %>% write_tsv("no_germline.no_blacklist.duplex_pileup_newPTA.tsv")
+filt4 %>% write_tsv("no_unrelated.no_germline.no_blacklist.duplex_pileup_newPTA.tsv")
+
+```
+
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+
+raw <- read_tsv("raw_duplex_pileup_newPTA.tsv")
+nogerm<-read_tsv("no_germline.no_blacklist.duplex_pileup_newPTA.tsv")
+filt <- read_tsv("no_unrelated.no_germline.no_blacklist.duplex_pileup_newPTA.tsv")
+
+ext_pileup <- read_tsv("raw_duplex_pileup_extended.tsv")
+```
+
+```{r}
+bamExistCols <- raw %>% colnames(.) %>% .[str_detect(., "exist")] %>% .[!str_detect(.,"PTA")]
+bulkExist_raw <- raw %>% dplyr::select(c("chr", "pos", "ref", "alt", bamExistCols))
+```
+
+```{r}
+library(stringr)
+
+platform_from_col <- function(x) {
+  str_remove(x, "^is_existing_lower_ci_0001_")
+}
+
+bam_platforms <- bamExistCols %>%
+  .[str_detect(., "^is_existing")] %>%
+  platform_from_col() %>%
+  unique()
+
+unrelated_bams <- raw$existing_in_unrelated_which %>%
+  .[. != "."] %>%                          # remove "."
+  str_split(",") %>%
+  unlist() %>%
+  unique()
+
+```
+
+```{r}
+related_bams_alt_count <- ext_pileup %>% dplyr::select(c("chr", "pos", "ref", "alt", paste0(bam_platforms, "_ALT_COUNT")))
+unrelated_bams_alt_count <- ext_pileup %>% dplyr::select(c("chr", "pos", "ref", "alt", paste0(unrelated_bams, "_ALT_COUNT")
+))
+
+```
+
+```{r}
+library(dplyr)
+
+# ALT count column names
+alt_cols <- paste0(bam_platforms, "_ALT_COUNT")
+
+# new column names
+new_cols <- paste0("is_altge1_", bam_platforms)
+
+# generate
+alt_ge1_df <- related_bams_alt_count %>%
+  mutate(
+    across(
+      all_of(alt_cols),
+      ~ as.integer(. >= 1),
+      .names = "is_altge1_{.col}"
+    )
+  ) %>%
+  # rename columns to match desired format
+  rename_with(
+    ~ gsub("_ALT_COUNT$", "", .) ,
+    starts_with("is_altge1_")
+  ) %>%
+  dplyr::select(chr, pos, ref, alt, starts_with("is_altge1_"))
+
+alt_ge1_df
+```
+
+
+```{r}
+library(dplyr)
+library(stringr)
+library(purrr)
+
+# -----------------------------
+# unrelated non-PTA BAMs to recompute from ALT_COUNT
+# -----------------------------
+unrelated_nonpta_bams <- unrelated_bams[!str_detect(unrelated_bams, "PTA")]
+unrelated_nonpta_alt_cols <- paste0(unrelated_nonpta_bams, "_ALT_COUNT")
+
+# sanity check
+stopifnot(all(unrelated_nonpta_alt_cols %in% colnames(ext_pileup)))
+
+# key check
+stopifnot(
+  identical(raw$chr, ext_pileup$chr),
+  identical(raw$pos, ext_pileup$pos),
+  identical(raw$ref, ext_pileup$ref),
+  identical(raw$alt, ext_pileup$alt)
+)
+
+# -----------------------------
+# helper: BAM name -> platform
+# -----------------------------
+bam_to_platform <- function(x) {
+  case_when(
+    str_detect(x, "PTA") ~ "PTA",
+    str_detect(x, "NANOSEQ") ~ "NANOSEQ",
+    str_detect(x, "UDSEQ") ~ "UDSEQ",
+    str_detect(x, "PPMSEQ") ~ "PPMSEQ",
+    str_detect(x, "ILLUMINA") ~ "ILLUMINA",
+    TRUE ~ NA_character_
+  )
+}
+
+# -----------------------------
+# helper: keep only PTA tokens from old which
+# -----------------------------
+extract_pta_tokens <- function(x) {
+  if (is.na(x) || x == ".") return(character(0))
+  toks <- str_split(x, ",", simplify = FALSE)[[1]]
+  toks <- toks[str_detect(toks, "PTA")]
+  unique(toks)
+}
+
+old_pta_tokens <- map(raw$existing_in_unrelated_which, extract_pta_tokens)
+
+# -----------------------------
+# recompute non-PTA unrelated BAM hits from ALT_COUNT >= 1
+# -----------------------------
+unrelated_alt_mat <- ext_pileup %>%
+  dplyr::select(all_of(unrelated_nonpta_alt_cols)) %>%
+  as.matrix()
+
+mode(unrelated_alt_mat) <- "numeric"
+
+new_nonpta_tokens <- apply(
+  unrelated_alt_mat,
+  1,
+  function(v) unrelated_nonpta_bams[which(v >= 1)]
+)
+
+# -----------------------------
+# combine PTA(old) + nonPTA(new)
+# -----------------------------
+altge1_tokens <- map2(old_pta_tokens, new_nonpta_tokens, function(pta, nonpta) {
+  out <- unique(c(pta, nonpta))
+  out[out != ""]
+})
+
+altge1_in_unrelated_which <- map_chr(altge1_tokens, function(x) {
+  if (length(x) == 0) "." else paste(x, collapse = ",")
+})
+
+altge1_in_unrelated_platform <- map_chr(altge1_tokens, function(x) {
+  if (length(x) == 0) return(".")
+  plats <- unique(bam_to_platform(x))
+  plats <- plats[!is.na(plats)]
+  if (length(plats) == 0) "." else paste(plats, collapse = ",")
+})
+
+altge1_in_unrelated <- as.integer(map_int(altge1_tokens, length) > 0)
+
+# -----------------------------
+# final table
+# -----------------------------
+raw_altge1_unrelated <- raw %>%
+  mutate(
+    altge1_in_unrelated = altge1_in_unrelated,
+    altge1_in_unrelated_platform = altge1_in_unrelated_platform,
+    altge1_in_unrelated_which = altge1_in_unrelated_which
+  )
+
+# preview
+raw_altge1_unrelated %>%
+  dplyr::select(
+    chr, pos, ref, alt,
+    existing_in_unrelated,
+    existing_in_unrelated_platform,
+    existing_in_unrelated_which,
+    altge1_in_unrelated,
+    altge1_in_unrelated_platform,
+    altge1_in_unrelated_which
+  ) %>%
+  as.data.frame() %>%
+  head(10)
+
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+
+# check keys
+stopifnot(
+  identical(raw[c("chr","pos","ref","alt")], alt_ge1_df[c("chr","pos","ref","alt")]),
+  identical(raw[c("chr","pos","ref","alt")], raw_altge1_unrelated[c("chr","pos","ref","alt")])
+)
+
+# columns to append
+altge1_cols_related <- alt_ge1_df %>%
+  colnames() %>%
+  .[str_detect(., "^is_altge1_")]
+
+altge1_cols_unrelated <- raw_altge1_unrelated %>%
+  colnames() %>%
+  .[str_detect(., "^altge1_in_unrelated")]
+
+# concatenate
+raw2 <- bind_cols(
+  raw,
+  alt_ge1_df %>% dplyr::select(all_of(altge1_cols_related)),
+  raw_altge1_unrelated %>% dplyr::select(all_of(altge1_cols_unrelated))
+)
+
+raw2
+```
+
+```{r}
+library(dplyr)
+
+# ---- prepare ampli table ----
+ampli_keyed <- ampli_out %>%
+  transmute(
+    chr = CHROM,
+    pos = POS,
+    ref = REF,
+    alt = ALT,
+    chung_ampli = CATEGORY,
+    chung_ampli_BLT_mosaic = as.integer(BLT_validated == 1)
+  )
+
+# ---- append to raw2 by variant key ----
+raw3 <- raw2 %>%
+  left_join(ampli_keyed, by = c("chr", "pos", "ref", "alt")) %>%
+  mutate(
+    chung_ampli = if_else(is.na(chung_ampli), ".", chung_ampli),
+    chung_ampli_BLT_mosaic = if_else(is.na(chung_ampli_BLT_mosaic), 0L, chung_ampli_BLT_mosaic)
+  )
+
+raw3
+
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+
+# 가져올 컬럼들
+new_cols <- colnames(raw3) %>%
+  .[str_detect(., "altge1|chung_ampli")]
+
+# key + new cols만 추출
+raw3_sub <- raw3 %>%
+  dplyr::select(chr, pos, ref, alt, all_of(new_cols))
+
+# nogerm에 붙이기
+nogerm3 <- nogerm %>%
+  left_join(raw3_sub, by = c("chr", "pos", "ref", "alt"))
+
+nogerm3
+
+```
+
+```{r}
+filt3 <- nogerm3 %>% filter(altge1_in_unrelated ==0)
+filt <- nogerm3 %>% filter(existing_in_unrelated ==0)
+```
+
+```{r}
+raw3 %>% write_tsv("raw_duplex_pileup_newPTA_altge1.tsv")
+nogerm3 %>% write_tsv("no_germline.no_blacklist.duplex_pileup_newPTA_altge1.tsv")
+filt %>% write_tsv("no_unrelated.no_germline.no_blacklist.duplex_pileup_newPTA_altge1_unrel_lowci.tsv")
+filt3 %>% write_tsv("no_unrelated.no_germline.no_blacklist.duplex_pileup_newPTA_altge1_unrel_altge1.tsv")
+
+
+```
+
+
+
+```{r}
+
+call_cols_full_depth <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  #"call_ppmSeq_putative_multiread",
+  "call_ppmSeq_singleton_HC",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+call_cols_100x <- c(
+  "call_Illumina_100x",
+  "call_ppmSeq_multiread_100x",
+  #"call_ppmSeq_putative_multiread_100x",
+  "call_ppmSeq_singleton_HC_100x",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+call_cols_30x <- c(
+  "call_Illumina_30x",
+  "call_ppmSeq_multiread_30x",
+  #"call_ppmSeq_putative_multiread_30x",
+  "call_ppmSeq_singleton_HC_30x",
+  "call_UDSeq_30x_multiread",
+  "call_UDSeq_30x_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+
+call_cols_ppmSeq_multiread <- c(
+  "call_ppmSeq_multiread",
+  "call_ppmSeq_multiread_30x",
+  "call_ppmSeq_multiread_100x",
+  "call_ppmSeq_multiread_200x"
+)
+
+call_cols_ppmSeq_singleton <- c(
+  "call_ppmSeq_singleton_HC",
+  "call_ppmSeq_singleton_HC_30x",
+  "call_ppmSeq_singleton_HC_100x",
+  "call_ppmSeq_singleton_HC_200x"
+)
+
+
+call_cols_illumina <- c(
+  "call_Illumina",
+  "call_Illumina_30x",
+  "call_Illumina_100x",
+  "call_Illumina_200x"
+)
+
+
+call_cols_full_depth_clonal_with_PTA <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  "call_UDSeq_multiread",
+  "call_NanoSeq_multiread",
+  "call_HiDEFseq_double_stranded",
+  "call_PTA_singleton"
+)
+call_cols_full_depth_clonal <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  "call_UDSeq_multiread",
+  "call_NanoSeq_multiread",
+  "call_HiDEFseq_double_stranded"
+)
+
+call_cols_100x_clonal_with_PTA <- c(
+  "call_Illumina_100x",
+  "call_ppmSeq_multiread_100x",
+  "call_UDSeq_multiread",
+  "call_NanoSeq_multiread",
+  "call_HiDEFseq_double_stranded",
+  "call_PTA_singleton"
+)
+
+
+call_cols_100x_clonal <- c(
+  "call_Illumina_100x",
+  "call_ppmSeq_multiread_100x",
+  "call_UDSeq_multiread",
+  "call_NanoSeq_multiread",
+  "call_HiDEFseq_double_stranded"
+)
+
+call_cols_30x_clonal_with_PTA <- c(
+  "call_Illumina_30x",
+  "call_ppmSeq_multiread_30x",
+  "call_UDSeq_30x_multiread",
+  "call_NanoSeq_multiread",
+  "call_HiDEFseq_double_stranded",
+  "call_PTA_singleton"
+)
+
+call_cols_30x_clonal <- c(
+  "call_Illumina_30x",
+  "call_ppmSeq_multiread_30x",
+  "call_UDSeq_30x_multiread",
+  "call_NanoSeq_multiread",
+  "call_HiDEFseq_double_stranded"
+)
+
+get_self_exist_cols_full <- function(callset) {
+
+  if (callset == "call_Illumina")
+    return("is_existing_lower_ci_0001_ILLUMINA")
+
+  if (callset %in% c("call_ppmSeq_multiread","call_ppmSeq_singleton_HC"))
+    return("is_existing_lower_ci_0001_DUPLEX_PPMSEQ")
+
+  if (callset %in% c("call_UDSeq_multiread","call_UDSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_UDSEQ")
+
+  if (callset %in% c("call_NanoSeq_multiread","call_NanoSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_NANOSEQ")
+
+  if (callset %in% c("call_HiDEFseq_double_stranded","call_HiDEFseq_single_stranded"))
+    return("is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ")
+
+  if (callset == "call_PTA_singleton")
+    return("existing_any_PTA1_16")
+
+  character(0)
+}
+
+
+
+exist_cols_full <- c(
+  "is_existing_lower_ci_0001_ILLUMINA",
+  "is_existing_lower_ci_0001_DUPLEX_PPMSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_UDSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_NANOSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ",
+  "existing_any_PTA1_16"
+)
+
+```
+
+
+```{r}
+call_cols_full_depth <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  #"call_ppmSeq_putative_multiread",
+  "call_ppmSeq_singleton_HC",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+get_self_exist_cols_full <- function(callset) {
+
+  if (callset == "call_Illumina")
+    return("is_existing_lower_ci_0001_ILLUMINA")
+
+  if (callset %in% c("call_ppmSeq_multiread","call_ppmSeq_singleton_HC"))
+    return("is_existing_lower_ci_0001_DUPLEX_PPMSEQ")
+
+  if (callset %in% c("call_UDSeq_multiread","call_UDSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_UDSEQ")
+
+  if (callset %in% c("call_NanoSeq_multiread","call_NanoSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_NANOSEQ")
+
+  if (callset %in% c("call_HiDEFseq_double_stranded","call_HiDEFseq_single_stranded"))
+    return("is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ")
+
+  if (callset == "call_PTA_singleton")
+    return("existing_any_PTA1_16")
+
+  character(0)
+}
+
+
+
+
+exist_cols_full <- c(
+  "is_existing_lower_ci_0001_ILLUMINA",
+  "is_existing_lower_ci_0001_DUPLEX_PPMSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_UDSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_NANOSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ",
+  "existing_any_PTA1_16"
+)
+
+get_self_exist_cols_full_altge1 <- function(callset) {
+
+  if (callset == "call_Illumina")
+    return("is_altge1_ILLUMINA")
+
+  if (callset %in% c("call_ppmSeq_multiread","call_ppmSeq_singleton_HC"))
+    return("is_altge1_DUPLEX_PPMSEQ")
+
+  if (callset %in% c("call_UDSeq_multiread","call_UDSeq_singleton"))
+    return("is_altge1_DUPLEX_UDSEQ")
+
+  if (callset %in% c("call_NanoSeq_multiread","call_NanoSeq_singleton"))
+    return("is_altge1_DUPLEX_NANOSEQ")
+
+  if (callset %in% c("call_HiDEFseq_double_stranded","call_HiDEFseq_single_stranded"))
+    return("is_altge1_DUPLEX_HIDEFSEQ")
+
+  if (callset == "call_PTA_singleton")
+    return(c("existing_any_PTA1_16_singleton","existing_any_PTA1_16_multiple"))
+
+  character(0)
+}
+
+
+exist_cols_full_altge1 <- c(
+  "is_altge1_ILLUMINA",
+  "is_altge1_DUPLEX_PPMSEQ",
+  "is_altge1_DUPLEX_UDSEQ",
+  "is_altge1_DUPLEX_NANOSEQ",
+  "is_altge1_DUPLEX_HIDEFSEQ",
+  "existing_any_PTA1_16"
+)
+
+
+prev_ampli_col <- c("chung_ampli")
+```
+
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+
+#raw <- read_tsv("raw_duplex_pileup_newPTA_altge1.tsv")
+#nogerm<-read_tsv("no_germline.no_blacklist.duplex_pileup_newPTA_altge1.tsv")
+#filt <- read_tsv("no_unrelated.no_germline.no_blacklist.duplex_pileup_newPTA_altge1_unrel_lowci.tsv")
+#filt_altge1<-read_tsv("no_unrelated.no_germline.no_blacklist.duplex_pileup_newPTA_altge1_unrel_altge1.tsv")
+ext_pileup <- read_tsv("raw_duplex_pileup_extended.tsv")
+
+#filt<-read_tsv("no_unrelated.no_germline.no_blacklist.duplex_pileup_newPTA_altge1_unrel_altge1.tsv")
+filt <- read_tsv("no_unrelated.no_germline.no_blacklist.duplex_pileup_newPTA_altge1_unrel_lowci.tsv")
+
+#filt_lowci <- read_tsv("no_unrelated.no_germline.no_blacklist.duplex_pileup_newPTA_altge1_unrel_lowci.tsv")
+#filt_altge1 <-read_tsv("no_unrelated.no_germline.no_blacklist.duplex_pileup_newPTA_altge1_unrel_altge1.tsv")
+#ext_pileup <- read_tsv("raw_duplex_pileup_extended.tsv")
+```
+
+```{r}
+#ext_pileup %>% dplyr::select(c(chr,pos,ref,alt, ))
+```
+
+
+### Start here
+
+
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+
+raw <- read_tsv("raw_duplex_pileup_newPTA_altge1.tsv")
+filt <- read_tsv("no_unrelated.no_germline.no_blacklist.duplex_pileup_newPTA_altge1_unrel_lowci.tsv")
+```
+
+### Stratified random selection SEED
+
+```{r}
+STRATIFICATION_SEED <- 42
+
+```
+
+
+```{r}
+library(dplyr)
+
+
+
+call_cols_full_depth <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  "call_ppmSeq_singleton_HC",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+get_self_exist_cols_full <- function(callset) {
+
+  if (callset == "call_Illumina")
+    return("is_existing_lower_ci_0001_ILLUMINA")
+
+  if (callset %in% c("call_ppmSeq_multiread","call_ppmSeq_singleton_HC"))
+    return("is_existing_lower_ci_0001_DUPLEX_PPMSEQ")
+
+  if (callset %in% c("call_UDSeq_multiread","call_UDSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_UDSEQ")
+
+  if (callset %in% c("call_NanoSeq_multiread","call_NanoSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_NANOSEQ")
+
+  if (callset %in% c("call_HiDEFseq_double_stranded","call_HiDEFseq_single_stranded"))
+    return("is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ")
+
+  if (callset == "call_PTA_singleton")
+    return(c("existing_any_PTA1_16"))
+
+  character(0)
+}
+
+
+
+exist_cols_full <- c(
+  "is_existing_lower_ci_0001_ILLUMINA",
+  "is_existing_lower_ci_0001_DUPLEX_PPMSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_UDSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_NANOSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ",
+  "existing_any_PTA1_16"
+)
+
+```
+
+
+
+### Start with "filt" get the tier-wise numbers
+```{r}
+library(dplyr)
+library(purrr)
+library(tibble)
+
+
+tiering_df <- filt
+
+tier_counts <- purrr::map_dfr(call_cols_full_depth, function(cs) {
+  
+  other_call_cols <- setdiff(call_cols_full_depth, cs)
+  self_exist_col <- get_self_exist_cols_full(cs)
+  other_exist_cols <- setdiff(exist_cols_full, self_exist_col)
+
+  #self_exist_col <- get_self_exist_cols_full_altge1(cs)
+  #other_exist_cols <- setdiff(exist_cols_full_altge1, self_exist_col)
+
+  self_called <- tiering_df[[cs]] == 1
+  
+  other_called_any <- rowSums(as.data.frame(tiering_df[, other_call_cols, drop = FALSE]), na.rm = TRUE) >= 1
+  other_called_none <- rowSums(as.data.frame(tiering_df[, other_call_cols, drop = FALSE]), na.rm = TRUE) == 0
+  
+  other_exist_any <- rowSums(as.data.frame(tiering_df[, other_exist_cols, drop = FALSE]), na.rm = TRUE) >= 1
+  other_exist_none <- rowSums(as.data.frame(tiering_df[, other_exist_cols, drop = FALSE]), na.rm = TRUE) == 0
+  
+  tibble(
+    callset = cs,
+    tier1 = sum(self_called & other_called_any, na.rm = TRUE),
+    tier2 = sum(self_called & other_called_none & other_exist_any, na.rm = TRUE),
+    tier3 = sum(self_called & other_called_none & other_exist_none, na.rm = TRUE),
+    total_called = sum(self_called, na.rm = TRUE)
+  )
+})
+
+tier_counts
+
+```
+
+
+```{r}
+library(dplyr)
+library(purrr)
+library(tibble)
+
+
+tier_summary <- purrr::map_dfr(call_cols_full_depth, function(cs) {
+  
+  other_call_cols <- setdiff(call_cols_full_depth, cs)
+  #self_exist_col <- get_self_exist_cols_full_altge1(cs)
+  self_exist_col <- get_self_exist_cols_full(cs)
+
+  #other_exist_cols <- setdiff(exist_cols_full_altge1, self_exist_col)
+  other_exist_cols <- setdiff(exist_cols_full, self_exist_col)
+  self_called <- filt[[cs]] == 1
+  other_called_n <- rowSums(as.data.frame(filt[, other_call_cols, drop = FALSE]), na.rm = TRUE)
+  other_exist_n <- rowSums(as.data.frame(filt[, other_exist_cols, drop = FALSE]), na.rm = TRUE)
+  is_chung_mosaic <- filt$chung_ampli_BLT_mosaic == 1
+  
+  idx_tier1 <- self_called & (other_called_n >= 1)
+  idx_tier2 <- self_called & (other_called_n == 0) & (other_exist_n >= 1)
+  idx_tier3 <- self_called & (other_called_n == 0) & (other_exist_n == 0)
+  
+  tibble(
+    callset = cs,
+    tier = c("tier1", "tier2", "tier3"),
+    number = c(
+      sum(idx_tier1, na.rm = TRUE),
+      sum(idx_tier2, na.rm = TRUE),
+      sum(idx_tier3, na.rm = TRUE)
+    ),
+    chung_et_al_2024 = c(
+      sum(idx_tier1 & is_chung_mosaic, na.rm = TRUE),
+      sum(idx_tier2 & is_chung_mosaic, na.rm = TRUE),
+      sum(idx_tier3 & is_chung_mosaic, na.rm = TRUE)
+    ),
+    new = c(
+      sum(idx_tier1 & !is_chung_mosaic, na.rm = TRUE),
+      sum(idx_tier2 & !is_chung_mosaic, na.rm = TRUE),
+      sum(idx_tier3 & !is_chung_mosaic, na.rm = TRUE)
+    )
+  )
+})
+
+tier_summary
+
+```
+
+```{r}
+library(dplyr)
+library(purrr)
+library(tibble)
+
+
+#exist_cols_noPTA <- setdiff(exist_cols_full_altge1, "existing_any_PTA1_16")
+
+exist_cols_noPTA <- setdiff(exist_cols_full, "existing_any_PTA1_16")
+
+
+
+get_self_exist_cols_noPTA <- function(callset) {
+
+  if (callset == "call_Illumina")
+    return("is_existing_lower_ci_0001_ILLUMINA")
+
+  if (callset %in% c("call_ppmSeq_multiread","call_ppmSeq_singleton_HC"))
+    return("is_existing_lower_ci_0001_DUPLEX_PPMSEQ")
+
+  if (callset %in% c("call_UDSeq_multiread","call_UDSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_UDSEQ")
+
+  if (callset %in% c("call_NanoSeq_multiread","call_NanoSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_NANOSEQ")
+
+  if (callset %in% c("call_HiDEFseq_double_stranded","call_HiDEFseq_single_stranded"))
+    return("is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ")
+
+
+  character(0)
+}
+
+
+tier_summary_noPTA <- purrr::map_dfr(call_cols_full_depth, function(cs) {
+  
+  other_call_cols <- setdiff(call_cols_full_depth, cs)
+  
+  #self_exist_col_full <- get_self_exist_cols_full_altge1(cs)
+  #other_exist_cols_full <- setdiff(exist_cols_full_altge1, self_exist_col_full)
+  
+  self_exist_col_full <- get_self_exist_cols_full(cs)
+  other_exist_cols_full <- setdiff(exist_cols_full, self_exist_col_full)
+  
+  self_exist_col_noPTA <- get_self_exist_cols_noPTA(cs)
+  other_exist_cols_noPTA <- setdiff(exist_cols_noPTA, self_exist_col_noPTA)
+  
+  self_called <- filt[[cs]] == 1
+  other_called_n <- rowSums(as.data.frame(filt[, other_call_cols, drop = FALSE]), na.rm = TRUE)
+  
+  other_exist_n_full <- rowSums(as.data.frame(filt[, other_exist_cols_full, drop = FALSE]), na.rm = TRUE)
+  other_exist_n_noPTA <- rowSums(as.data.frame(filt[, other_exist_cols_noPTA, drop = FALSE]), na.rm = TRUE)
+  
+  is_chung_mosaic <- filt$chung_ampli_BLT_mosaic == 1
+  
+  idx_tier1 <- self_called & (other_called_n >= 1)
+  idx_tier2 <- self_called & (other_called_n == 0) & (other_exist_n_full >= 1)
+  idx_tier2_noPTA <- self_called & (other_called_n == 0) & (other_exist_n_noPTA >= 1)
+  idx_tier3 <- self_called & (other_called_n == 0) & (other_exist_n_full == 0)
+  
+  tibble(
+    callset = cs,
+    tier = c("tier1", "tier2", "tier2_noPTA", "tier3"),
+    number = c(
+      sum(idx_tier1, na.rm = TRUE),
+      sum(idx_tier2, na.rm = TRUE),
+      sum(idx_tier2_noPTA, na.rm = TRUE),
+      sum(idx_tier3, na.rm = TRUE)
+    ),
+    chung_et_al_2024 = c(
+      sum(idx_tier1 & is_chung_mosaic, na.rm = TRUE),
+      sum(idx_tier2 & is_chung_mosaic, na.rm = TRUE),
+      sum(idx_tier2_noPTA & is_chung_mosaic, na.rm = TRUE),
+      sum(idx_tier3 & is_chung_mosaic, na.rm = TRUE)
+    ),
+    new = c(
+      sum(idx_tier1 & !is_chung_mosaic, na.rm = TRUE),
+      sum(idx_tier2 & !is_chung_mosaic, na.rm = TRUE),
+      sum(idx_tier2_noPTA & !is_chung_mosaic, na.rm = TRUE),
+      sum(idx_tier3 & !is_chung_mosaic, na.rm = TRUE)
+    )
+  )
+})
+
+tier_summary_noPTA
+```
+
+
+
+### tier1 selection
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(purrr)
+  library(tibble)
+})
+
+set.seed(STRATIFICATION_SEED)
+
+# Exclude HiDEFseq single stranded
+callsets_use <- setdiff(call_cols_full_depth, "call_HiDEFseq_single_stranded")
+
+# Fixed variant key from user-provided columns
+filt2 <- filt %>%
+  mutate(
+    variant_key = paste(chr, pos, ref, alt, sep = ":")
+  )
+
+tier1_candidates <- purrr::map_dfr(callsets_use, function(cs) {
+  
+  other_call_cols <- setdiff(call_cols_full_depth, cs)
+  
+  self_called <- filt2[[cs]] == 1
+  other_called_n <- rowSums(as.data.frame(filt2[, other_call_cols, drop = FALSE]), na.rm = TRUE)
+  
+  idx_tier1 <- self_called & (other_called_n >= 1)
+  
+  filt2[idx_tier1, , drop = FALSE] %>%
+    dplyr::filter(chung_ampli_BLT_mosaic == 0) %>%   # <- 추가
+    transmute(
+      chr,
+      pos,
+      ref,
+      alt,
+      variant_key,
+      chung_ampli_BLT_mosaic
+    ) %>%
+    mutate(callset = cs) %>%
+    distinct()
+})
+# Order by smaller available tier1 first
+callset_order <- tier1_candidates %>%
+  dplyr::count(callset, name = "avail_n") %>%
+  arrange(avail_n, callset)
+
+# Greedy sampling without duplicate variants across callsets
+selected_keys <- character(0)
+selected_list <- vector("list", length = nrow(callset_order))
+
+for (i in seq_len(nrow(callset_order))) {
+  cs <- callset_order$callset[i]
+  
+  cand_cs <- tier1_candidates %>%
+    dplyr::filter(callset == cs, !variant_key %in% selected_keys)
+  
+  take_n <- min(10, nrow(cand_cs))
+  
+  if (take_n == 0) {
+    selected_list[[i]] <- tibble(
+      chr = character(0),
+      pos = numeric(0),
+      ref = character(0),
+      alt = character(0),
+      variant_key = character(0),
+      callset = character(0),
+      chung_ampli_BLT_mosaic = numeric(0)
+    )
+  } else {
+    picked <- cand_cs %>%
+      slice_sample(n = take_n)
+    
+    selected_keys <- c(selected_keys, picked$variant_key)
+    selected_list[[i]] <- picked
+  }
+}
+
+tier1_selected <- bind_rows(selected_list) %>%
+  left_join(callset_order, by = "callset") %>%
+  arrange(avail_n, callset, chr, pos, ref, alt)
+
+tier1_selected_summary <- tier1_selected %>%
+  dplyr::count(callset, name = "selected_n") %>%
+  right_join(callset_order, by = "callset") %>%
+  mutate(selected_n = dplyr::coalesce(selected_n, 0L)) %>%
+  arrange(avail_n, callset)
+
+
+tier1_selected %>%
+  dplyr::count(variant_key) %>%
+  dplyr::filter(n > 1)
+
+# Add overlap partners from original tier1 candidate universe
+tier1_overlap_annot <- tier1_candidates %>%
+  group_by(variant_key) %>%
+  summarise(
+    all_tier1_callsets = paste(sort(unique(callset)), collapse = ","),
+    n_tier1_callsets = dplyr::n_distinct(callset),
+    .groups = "drop"
+  )
+
+tier1_selected_annot <- tier1_selected %>%
+  left_join(tier1_overlap_annot, by = "variant_key") %>%
+  rowwise() %>%
+  mutate(
+    overlap_partner_callsets = paste(
+      setdiff(strsplit(all_tier1_callsets, ",", fixed = TRUE)[[1]], callset),
+      collapse = ","
+    ),
+    overlap_partner_callsets = ifelse(overlap_partner_callsets == "", NA_character_, overlap_partner_callsets)
+  ) %>%
+  ungroup() %>%
+  dplyr::select(
+    chr, pos, ref, alt, variant_key, callset, avail_n,
+    n_tier1_callsets, overlap_partner_callsets, chung_ampli_BLT_mosaic
+  ) %>%
+  arrange(avail_n, callset, chr, pos, ref, alt)
+
+tier1_selected_annot
+```
+
+
+
+
+
+### tier2 stratification considering PTA
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(purrr)
+  library(stringr)
+  library(tidyr)
+})
+
+call_cols_full_depth <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  "call_ppmSeq_singleton_HC",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+exist_pretty_map <- c(
+  "is_existing_lower_ci_0001_ILLUMINA" = "ILLUMINA",
+  "is_existing_lower_ci_0001_DUPLEX_PPMSEQ" = "PPMSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_UDSEQ" = "UDSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_NANOSEQ" = "NANOSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ" = "HIDEFSEQ",
+  "existing_any_PTA1_16" = "PTA"
+)
+
+source_levels <- c("ILLUMINA", "PPMSEQ", "UDSEQ", "NANOSEQ", "HIDEFSEQ", "PTA")
+
+tier2_new_source_considerPTA_df <- purrr::map_dfr(call_cols_full_depth, function(cs) {
+  
+  other_call_cols <- setdiff(call_cols_full_depth, cs)
+  #self_exist_col <- get_self_exist_cols_full_altge1(cs)
+  #other_exist_cols <- setdiff(exist_cols_full_altge1, self_exist_col)
+  
+  self_exist_col <- get_self_exist_cols_full(cs)
+  other_exist_cols <- setdiff(exist_cols_full, self_exist_col)  
+  
+  self_called <- filt[[cs]] == 1
+  other_called_n <- rowSums(as.data.frame(filt[, other_call_cols, drop = FALSE]), na.rm = TRUE)
+  other_exist_mat <- as.data.frame(filt[, other_exist_cols, drop = FALSE])
+  other_exist_n <- rowSums(other_exist_mat, na.rm = TRUE)
+  
+  idx_tier2_new <- self_called &
+    (other_called_n == 0) &
+    (other_exist_n >= 1) &
+    (filt$chung_ampli_BLT_mosaic != 1)
+  
+  if (sum(idx_tier2_new, na.rm = TRUE) == 0) {
+    return(tibble(callset = character(0), source_group = character(0), n = integer(0)))
+  }
+  
+  source_group_vec <- apply(other_exist_mat[idx_tier2_new, , drop = FALSE], 1, function(x) {
+    hit_cols <- names(x)[which(x >= 1)]
+    hit_sources <- unname(exist_pretty_map[hit_cols]) %>%
+      unique() %>%
+      .[order(match(., source_levels))]
+    
+    bulk_sources <- setdiff(hit_sources, "PTA")
+    
+    if (length(bulk_sources) == 0) {
+      "PTA_only"
+    } else if (length(bulk_sources) == 1) {
+      bulk_sources
+    } else {
+      "MULTIPLE_BULK"
+    }
+  })
+  
+  tibble(
+    callset = cs,
+    source_group = source_group_vec
+  ) %>%
+    dplyr::count(callset, source_group, name = "n")
+})
+
+group_levels <- c(
+  "PTA_only",
+  "ILLUMINA",
+  "PPMSEQ",
+  "UDSEQ",
+  "NANOSEQ",
+  "HIDEFSEQ",
+  "MULTIPLE_BULK"
+)
+
+callset_to_source <- c(
+  "call_Illumina" = "ILLUMINA",
+  "call_ppmSeq_multiread" = "PPMSEQ",
+  "call_ppmSeq_singleton_HC" = "PPMSEQ",
+  "call_UDSeq_multiread" = "UDSEQ",
+  "call_UDSeq_singleton" = "UDSEQ",
+  "call_NanoSeq_multiread" = "NANOSEQ",
+  "call_NanoSeq_singleton" = "NANOSEQ",
+  "call_HiDEFseq_double_stranded" = "HIDEFSEQ",
+  "call_HiDEFseq_single_stranded" = "HIDEFSEQ",
+  "call_PTA_singleton" = "PTA"
+)
+
+allowed_grid <- tidyr::expand_grid(
+  callset = call_cols_full_depth,
+  source_group = group_levels
+) %>%
+  mutate(
+    self_source = unname(callset_to_source[as.character(callset)])
+  ) %>%
+  dplyr::filter(source_group != self_source) %>%
+  dplyr::select(-self_source)
+
+tier2_new_source_considerPTA_df <- allowed_grid %>%
+  left_join(
+    tier2_new_source_considerPTA_df %>%
+      mutate(
+        callset = as.character(callset),
+        source_group = as.character(source_group)
+      ),
+    by = c("callset", "source_group")
+  ) %>%
+  mutate(
+    n = dplyr::coalesce(n, 0L),
+    callset = factor(callset, levels = call_cols_full_depth),
+    source_group = factor(source_group, levels = group_levels)
+  ) %>%
+  arrange(callset, source_group)
+
+tier2_new_source_considerPTA_df
+
+```
+
+#### AmpliSeq allocation number decision
+```{r}
+tier1_num <- tier1_selected_annot %>% nrow(.) # 55
+tier2_PTA_only_num <- 120
+tier2_remainder_num <- 300
+tier3_num <- 220
+germ_althom_num <- 25
+germ_het_num <- 60
+
+
+tier2_PTA_only_num_min_quota <- 5
+tier2_remainder_num_min_quota <- 10
+tier3_min_quota <- 5
+
+
+total_expected_num <- tier1_num + tier2_PTA_only_num + tier2_remainder_num + tier3_num + germ_althom_num + germ_het_num
+
+
+total_expected_num
+STRATIFICATION_SEED
+```
+
+### tier2 number allocation run
+```{r}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tidyr)
+})
+
+
+strata_tier2 <- tier2_new_source_considerPTA_df %>%
+  dplyr::filter(callset != "call_HiDEFseq_single_stranded") %>%
+  dplyr::filter(!(callset == "call_PTA_singleton" & source_group == "PTA_only")) %>%
+  mutate(PTA_only = source_group == "PTA_only")
+
+make_target_map <- function(a = 100L, b = 200L, c = 5L, d = 10L) {
+  tibble(
+    PTA_only = c(TRUE, FALSE),
+    target_total = c(a, b),
+    min_quota = c(c, d)
+  )
+}
+
+target_map <- make_target_map(tier2_PTA_only_num, tier2_remainder_num, tier2_PTA_only_num_min_quota, tier2_remainder_num_min_quota)
+
+minscale_integer_alloc <- function(x, total_n, min_n) {
+  k <- length(x)
+  stopifnot(total_n >= k * min_n)
+  
+  xmin <- min(x)
+  xsum <- sum(x)
+  
+  if (all(x == xmin)) {
+    y <- rep(total_n / k, k)
+  } else {
+    a <- (total_n - min_n * k) / (xsum - k * xmin)
+    b <- min_n - a * xmin
+    y <- a * x + b
+  }
+  
+  y_floor <- floor(y)
+  remainder <- y - y_floor
+  n_to_add <- total_n - sum(y_floor)
+  
+  y_int <- y_floor
+  if (n_to_add > 0) {
+    add_idx <- order(remainder, decreasing = TRUE)[seq_len(n_to_add)]
+    y_int[add_idx] <- y_int[add_idx] + 1L
+  }
+  
+  as.integer(y_int)
+}
+
+# cap after integerization, then redistribute leftover to feasible groups
+cap_and_redistribute <- function(df_one_pta) {
+  # required columns:
+  # callset, step1_num, step1_num_int_raw, n_total, target_total
+  
+  out <- df_one_pta %>%
+    mutate(
+      capacity = n_total,
+      step1_num_int = pmin(step1_num_int_raw, capacity)
+    )
+  
+  deficit <- unique(out$target_total) - sum(out$step1_num_int)
+  
+  if (deficit < 0) {
+    stop("Capped allocation exceeded target_total, which should not happen.")
+  }
+  
+  if (deficit == 0) {
+    return(out)
+  }
+  
+  # redistribute leftover one-by-one
+  # priority: larger step1_num first, then larger remaining capacity
+  while (deficit > 0) {
+    out <- out %>%
+      mutate(room_left = capacity - step1_num_int)
+    
+    eligible <- which(out$room_left > 0)
+    if (length(eligible) == 0) {
+      stop("No eligible group left for redistribution.")
+    }
+    
+    ord <- eligible[order(-out$step1_num[eligible], -out$room_left[eligible])]
+    pick <- ord[1]
+    
+    out$step1_num_int[pick] <- out$step1_num_int[pick] + 1L
+    deficit <- deficit - 1L
+  }
+  
+  out %>%
+    dplyr::select(-room_left)
+}
+
+# 1. Sqrt-based number allocation
+step1_alloc <- strata_tier2 %>%
+  group_by(callset, PTA_only) %>%
+  dplyr::summarise(n_total = sum(n), .groups = "drop") %>%
+  left_join(target_map, by = "PTA_only") %>%
+  group_by(PTA_only) %>%
+  mutate(
+    sqrt_n_total = sqrt(n_total),
+    step1_num = target_total[1] * sqrt_n_total / sum(sqrt_n_total)
+  ) %>%
+  ungroup()
+
+# 2. Min-scaling + integerization
+step1_alloc <- step1_alloc %>%
+  group_by(PTA_only) %>%
+  group_modify(~{
+    .x %>%
+      mutate(
+        step1_num_int_raw = minscale_integer_alloc(
+          x = step1_num,
+          total_n = .$target_total[1],
+          min_n = .$min_quota[1]
+        )
+      )
+  }) %>%
+  ungroup()
+
+# 3. Capacity capping + redistribution within each PTA_only group
+step1_alloc <- step1_alloc %>%
+  group_by(PTA_only) %>%
+  group_modify(~ cap_and_redistribute(.x)) %>%
+  ungroup()
+
+# attach back to strata_tier2
+strata_tier2 <- strata_tier2 %>%
+  left_join(
+    step1_alloc %>%
+      dplyr::select(callset, PTA_only, step1_num, step1_num_int),
+    by = c("callset", "PTA_only")
+  )
+
+alpha <- 0.5
+
+alloc_step2_power_B <- function(n_vec, total_n, alpha = 0.5) {
+  n_vec <- as.integer(n_vec)
+  total_n <- as.integer(total_n)
+
+  if (any(is.na(n_vec)) || any(n_vec < 0)) {
+    stop("n_vec must be non-negative integers.")
+  }
+  if (length(total_n) != 1 || is.na(total_n) || total_n < 0) {
+    stop("total_n must be a single non-negative integer.")
+  }
+  if (sum(n_vec) < total_n) {
+    stop("Requested total_n exceeds available capacity sum(n_vec).")
+  }
+
+  # Strategy B: minimum 1 if n >= 1
+  alloc <- ifelse(n_vec >= 1L, 1L, 0L)
+  alloc <- pmin(alloc, n_vec)
+
+  if (sum(alloc) > total_n) {
+    # If even min-1 is too much, give 1 to the largest groups only
+    out <- rep(0L, length(n_vec))
+    eligible <- which(n_vec >= 1L)
+    w <- n_vec[eligible]^alpha
+    ord <- eligible[order(-w, -n_vec[eligible])]
+    pick <- ord[seq_len(total_n)]
+    out[pick] <- 1L
+    return(as.integer(out))
+  }
+
+  remaining <- total_n - sum(alloc)
+  if (remaining == 0) {
+    return(as.integer(alloc))
+  }
+
+  # Proportional allocation with capacity cap
+  while (remaining > 0) {
+    cap_left <- n_vec - alloc
+    eligible <- which(cap_left > 0)
+
+    if (length(eligible) == 0) {
+      stop("No remaining capacity, but quota still left.")
+    }
+
+    w <- n_vec[eligible]^alpha
+    if (sum(w) == 0) {
+      w <- rep(1, length(eligible))
+    }
+
+    y <- remaining * w / sum(w)
+    y_floor <- floor(y)
+    y_rem <- y - y_floor
+
+    add <- y_floor
+
+    # largest remainder
+    n_to_add <- remaining - sum(add)
+    if (n_to_add > 0) {
+      add_idx <- order(y_rem, decreasing = TRUE)[seq_len(n_to_add)]
+      add[add_idx] <- add[add_idx] + 1L
+    }
+
+    # apply with cap
+    add_capped <- pmin(add, cap_left[eligible])
+    alloc[eligible] <- alloc[eligible] + add_capped
+
+    allocated_now <- sum(add_capped)
+    if (allocated_now == 0) {
+      # safety fallback: add 1 to the largest eligible group
+      i <- eligible[order(-w, -cap_left[eligible])][1]
+      alloc[i] <- alloc[i] + 1L
+      remaining <- remaining - 1L
+    } else {
+      remaining <- total_n - sum(alloc)
+    }
+  }
+
+  as.integer(alloc)
+}
+
+strata_tier2_strategyB_alpha <- strata_tier2 %>%
+  group_by(callset, PTA_only) %>%
+  group_modify(~{
+    quota <- unique(.x$step1_num_int)
+    if (length(quota) != 1) {
+      stop("Each callset/PTA_only group must have one unique step1_num_int.")
+    }
+
+    .x %>%
+      mutate(
+        step2_num_int = alloc_step2_power_B(
+          n_vec = n,
+          total_n = quota,
+          alpha = alpha
+        )
+      )
+  }) %>%
+  ungroup()
+
+checkB_alpha <- strata_tier2_strategyB_alpha %>%
+  group_by(callset, PTA_only) %>%
+  dplyr::summarise(
+    step1_num_int = unique(step1_num_int),
+    step2_sum = sum(step2_num_int),
+    total_capacity = sum(n),
+    any_exceed = any(step2_num_int > n),
+    .groups = "drop"
+  )
+
+
+minscale_integer_alloc <- function(x, total_n, min_n) {
+  k <- length(x)
+  stopifnot(total_n >= k * min_n)
+  
+  xmin <- min(x)
+  xsum <- sum(x)
+  
+  if (all(x == xmin)) {
+    y <- rep(total_n / k, k)
+  } else {
+    a <- (total_n - min_n * k) / (xsum - k * xmin)
+    b <- min_n - a * xmin
+    y <- a * x + b
+  }
+  
+  y_floor <- floor(y)
+  remainder <- y - y_floor
+  n_to_add <- total_n - sum(y_floor)
+  
+  y_int <- y_floor
+  if (n_to_add > 0) {
+    add_idx <- order(remainder, decreasing = TRUE)[seq_len(n_to_add)]
+    y_int[add_idx] <- y_int[add_idx] + 1L
+  }
+  
+  as.integer(y_int)
+}
+
+cap_and_redistribute <- function(df, total_target) {
+  out <- df %>%
+    mutate(
+      capacity = new,
+      alloc_int = pmin(alloc_int_raw, capacity)
+    )
+  
+  deficit <- total_target - sum(out$alloc_int)
+  
+  if (deficit < 0) {
+    stop("Capped allocation exceeded total_target.")
+  }
+  
+  if (deficit == 0) {
+    return(out)
+  }
+  
+  while (deficit > 0) {
+    out <- out %>%
+      mutate(room_left = capacity - alloc_int)
+    
+    eligible <- which(out$room_left > 0)
+    if (length(eligible) == 0) {
+      stop("No eligible group left for redistribution.")
+    }
+    
+    ord <- eligible[order(-out$alloc_cont[eligible], -out$room_left[eligible])]
+    pick <- ord[1]
+    
+    out$alloc_int[pick] <- out$alloc_int[pick] + 1L
+    deficit <- deficit - 1L
+  }
+  
+  out %>%
+    dplyr::select(-room_left)
+}
+
+tier3_alloc <- tier_summary %>%
+  dplyr::filter(callset != "call_HiDEFseq_single_stranded") %>%
+  dplyr::filter(tier == "tier3") %>%
+  mutate(
+    sqrt_new = sqrt(new),
+    alloc_cont = tier3_num * sqrt_new / sum(sqrt_new)
+  ) %>%
+  mutate(
+    alloc_int_raw = minscale_integer_alloc(
+      x = alloc_cont,
+      total_n = tier3_num,
+      min_n = tier3_min_quota
+    )
+  ) %>%
+  cap_and_redistribute(total_target = tier3_num) %>%
+  arrange(desc(alloc_int), desc(new))
+
+tier3_alloc
+
+tier3_alloc <- tier3_alloc %>%
+  dplyr::mutate(
+    callset = factor(
+      callset,
+      levels = levels(strata_tier2_strategyB_alpha$callset)
+    )
+  ) %>%
+  dplyr::arrange(callset)
+
+
+
+ampli_alloc_tbl <- strata_tier2_strategyB_alpha %>%
+  dplyr::mutate(tier = "tier2") %>%
+  dplyr::select(
+    tier,
+    callset,
+    PTA_only,
+    source_group,
+    n,
+    step1_num,
+    step1_num_int,
+    step2_num_int
+  ) %>%
+  dplyr::bind_rows(
+    tibble::tibble(
+      tier = "tier1",
+      callset = "call_shared",
+      PTA_only = FALSE,
+      source_group = ".",
+      n = tier1_num,
+      step1_num = tier1_num,
+      step1_num_int = tier1_num,
+      step2_num_int = tier1_num
+    ),
+    .
+  )
+
+
+ampli_alloc_tbl <- ampli_alloc_tbl %>%
+  dplyr::bind_rows(
+    tier3_alloc %>%
+      dplyr::transmute(
+        tier = "tier3",
+        callset = as.character(callset),
+        PTA_only = FALSE,
+        source_group = ".",
+        n = new,
+        step1_num = alloc_int,
+        step1_num_int = alloc_int,
+        step2_num_int = alloc_int
+      ),
+    tibble::tibble(
+      tier = "germline_althom",
+      callset = "germline_althom",
+      PTA_only = FALSE,
+      source_group = ".",
+      n = germ_althom_num,
+      step1_num = germ_althom_num,
+      step1_num_int = germ_althom_num,
+      step2_num_int = germ_althom_num
+    ),
+    tibble::tibble(
+      tier = "germline_het",
+      callset = "germline_het",
+      PTA_only = FALSE,
+      source_group = ".",
+      n = germ_het_num,
+      step1_num = germ_het_num,
+      step1_num_int = germ_het_num,
+      step2_num_int = germ_het_num
+    )
+  )
+
+ampli_alloc_tbl %>% write_tsv("ampliseq_allocation_numbers_by_tier_and_strata.tsv")
+
+```
+
+
+### tier2 stratified selection - check numbers
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(purrr)
+  library(stringr)
+  library(tidyr)
+})
+
+
+exist_pretty_map <- c(
+  "is_existing_lower_ci_0001_ILLUMINA" = "ILLUMINA",
+  "is_existing_lower_ci_0001_DUPLEX_PPMSEQ" = "PPMSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_UDSEQ" = "UDSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_NANOSEQ" = "NANOSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ" = "HIDEFSEQ",
+  "existing_any_PTA1_16" = "PTA"
+)
+
+source_levels <- c("ILLUMINA", "PPMSEQ", "UDSEQ", "NANOSEQ", "HIDEFSEQ", "PTA")
+
+# Row-level tier2 variant table
+tier2_variant_tbl <- purrr::map_dfr(call_cols_full_depth, function(cs) {
+  
+  other_call_cols <- setdiff(call_cols_full_depth, cs)
+  
+  self_exist_col <- get_self_exist_cols_full(cs)
+  other_exist_cols <- setdiff(exist_cols_full, self_exist_col)
+  
+  self_called <- filt[[cs]] == 1
+  other_called_n <- rowSums(as.data.frame(filt[, other_call_cols, drop = FALSE]), na.rm = TRUE)
+  other_exist_mat <- as.data.frame(filt[, other_exist_cols, drop = FALSE])
+  other_exist_n <- rowSums(other_exist_mat, na.rm = TRUE)
+  
+  idx_tier2 <- self_called &
+    (other_called_n == 0) &
+    (other_exist_n >= 1) &
+    (filt$chung_ampli_BLT_mosaic != 1)
+  
+  if (sum(idx_tier2, na.rm = TRUE) == 0) {
+    return(tibble(
+      chr = character(0),
+      pos = numeric(0),
+      ref = character(0),
+      alt = character(0),
+      callset = character(0),
+      source_group = character(0),
+      PTA_only = logical(0)
+    ))
+  }
+  
+  sub_filt <- filt[idx_tier2, , drop = FALSE]
+  sub_exist_mat <- other_exist_mat[idx_tier2, , drop = FALSE]
+  
+  source_group_vec <- apply(sub_exist_mat, 1, function(x) {
+    hit_cols <- names(x)[which(x >= 1)]
+    hit_sources <- unname(exist_pretty_map[hit_cols]) %>%
+      unique() %>%
+      .[order(match(., source_levels))]
+    
+    bulk_sources <- setdiff(hit_sources, "PTA")
+    
+    if (length(bulk_sources) == 0) {
+      "PTA_only"
+    } else if (length(bulk_sources) == 1) {
+      bulk_sources
+    } else {
+      "MULTIPLE_BULK"
+    }
+  })
+  
+  tibble(
+    chr = sub_filt$chr,
+    pos = sub_filt$pos,
+    ref = sub_filt$ref,
+    alt = sub_filt$alt,
+    callset = cs,
+    source_group = source_group_vec,
+    PTA_only = source_group_vec == "PTA_only"
+  )
+})
+
+# Apply the same exclusions used for ampli_alloc_tbl tier2
+tier2_variant_tbl <- tier2_variant_tbl %>%
+  dplyr::filter(callset != "call_HiDEFseq_single_stranded") %>%
+  dplyr::filter(!(callset == "call_PTA_singleton" & source_group == "PTA_only"))
+
+# Row-level count
+tier2_variant_count_check <- tier2_variant_tbl %>%
+  group_by(callset, PTA_only, source_group) %>%
+  dplyr::summarise(n_rowlevel = n(), .groups = "drop") %>%
+  arrange(callset, PTA_only, source_group)
+
+# Allocation table count
+tier2_alloc_count_check <- ampli_alloc_tbl %>%
+  dplyr::filter(tier == "tier2") %>%
+  dplyr::select(callset, PTA_only, source_group, n, step2_num_int) %>%
+  rename(n_alloc_tbl = n) %>%
+  arrange(callset, PTA_only, source_group)
+
+# Compare
+tier2_check_compare <- tier2_alloc_count_check %>%
+  full_join(
+    tier2_variant_count_check,
+    by = c("callset", "PTA_only", "source_group")
+  ) %>%
+  mutate(
+    n_alloc_tbl = dplyr::coalesce(n_alloc_tbl, 0L),
+    n_rowlevel = dplyr::coalesce(n_rowlevel, 0L),
+    count_match = (n_alloc_tbl == n_rowlevel),
+    feasible = step2_num_int <= n_rowlevel
+  ) %>%
+  arrange(callset, PTA_only, source_group)
+
+tier2_check_compare
+
+tier2_check_compare %>% dplyr::select(count_match, feasible) %>% table(.)
+```
+
+### Tier2 - stratified selection
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+})
+
+set.seed(STRATIFICATION_SEED)
+
+# 1. Allocation table in the exact stratum order you want
+tier2_alloc_ordered <- ampli_alloc_tbl %>%
+  dplyr::filter(tier == "tier2") %>%
+  mutate(stratum_order = dplyr::row_number()) %>%
+  dplyr::select(stratum_order, callset, PTA_only, source_group, n, step2_num_int)
+
+# 2. Attach stratum order and target number to row-level tier2 variants
+tier2_variant_tbl2 <- tier2_variant_tbl %>%
+  inner_join(
+    tier2_alloc_ordered %>%
+      dplyr::select(stratum_order, callset, PTA_only, source_group, step2_num_int),
+    by = c("callset", "PTA_only", "source_group")
+  )
+
+# 3. Stratified sampling in the same stratum order
+tier2_sampled <- tier2_alloc_ordered %>%
+  group_split(stratum_order, .keep = TRUE) %>%
+  lapply(function(one_stratum) {
+    this_order <- one_stratum$stratum_order[1]
+    this_callset <- one_stratum$callset[1]
+    this_pta <- one_stratum$PTA_only[1]
+    this_source <- one_stratum$source_group[1]
+    this_n <- one_stratum$step2_num_int[1]
+    
+    tier2_variant_tbl2 %>%
+      dplyr::filter(
+        stratum_order == this_order,
+        callset == this_callset,
+        PTA_only == this_pta,
+        source_group == this_source
+      ) %>%
+      slice_sample(n = this_n) %>%
+      mutate(sampled_n = this_n)
+  }) %>%
+  bind_rows() %>%
+  arrange(stratum_order, chr, pos, ref, alt) %>%
+  dplyr::select(
+    stratum_order,
+    chr, pos, ref, alt,
+    callset, PTA_only, source_group,
+    sampled_n
+  )
+
+tier2_sampled
+```
+
+### tier2 selection validation
+```{r}
+tier2_sampled_check <- tier2_sampled %>%
+  group_by(stratum_order, callset, PTA_only, source_group) %>%
+  dplyr::summarise(n_sampled = dplyr::n(), .groups = "drop") %>%
+  left_join(
+    tier2_alloc_ordered %>%
+      dplyr::select(stratum_order, callset, PTA_only, source_group, step2_num_int),
+    by = c("stratum_order", "callset", "PTA_only", "source_group")
+  ) %>%
+  mutate(match = (n_sampled == step2_num_int)) %>%
+  arrange(stratum_order)
+
+tier2_sampled_check
+
+
+
+
+
+tier2_sampled_check$match %>% table(.)
+```
+
+### tier3 selection - check
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(purrr)
+  library(tidyr)
+})
+
+call_cols_full_depth_tier3 <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  "call_ppmSeq_singleton_HC",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_PTA_singleton"
+)
+
+# Row-level tier3 table
+tier3_variant_tbl <- purrr::map_dfr(call_cols_full_depth_tier3, function(cs) {
+  
+  other_call_cols <- setdiff(call_cols_full_depth_tier3, cs)
+  
+  self_exist_col <- get_self_exist_cols_full(cs)
+  other_exist_cols <- setdiff(exist_cols_full, self_exist_col)
+  
+  self_called <- filt[[cs]] == 1
+  other_called_n <- rowSums(as.data.frame(filt[, other_call_cols, drop = FALSE]), na.rm = TRUE)
+  other_exist_n <- rowSums(as.data.frame(filt[, other_exist_cols, drop = FALSE]), na.rm = TRUE)
+  
+  idx_tier3 <- self_called &
+    (other_called_n == 0) &
+    (other_exist_n == 0) &
+    (filt$chung_ampli_BLT_mosaic != 1)
+  
+  if (sum(idx_tier3, na.rm = TRUE) == 0) {
+    return(tibble(
+      chr = character(0),
+      pos = numeric(0),
+      ref = character(0),
+      alt = character(0),
+      callset = character(0),
+      PTA_only = logical(0),
+      source_group = character(0)
+    ))
+  }
+  
+  sub_filt <- filt[idx_tier3, , drop = FALSE]
+  
+  tibble(
+    chr = sub_filt$chr,
+    pos = sub_filt$pos,
+    ref = sub_filt$ref,
+    alt = sub_filt$alt,
+    callset = cs,
+    PTA_only = FALSE,
+    source_group = "."
+  )
+})
+
+# Row-level count
+tier3_variant_count_check <- tier3_variant_tbl %>%
+  group_by(callset, PTA_only, source_group) %>%
+  dplyr::summarise(n_rowlevel = dplyr::n(), .groups = "drop") %>%
+  arrange(callset)
+
+# Allocation table count
+tier3_alloc_count_check <- ampli_alloc_tbl %>%
+  dplyr::filter(tier == "tier3") %>%
+  dplyr::select(callset, PTA_only, source_group, n, step2_num_int) %>%
+  rename(n_alloc_tbl = n) %>%
+  arrange(callset)
+
+# Compare
+tier3_check_compare <- tier3_alloc_count_check %>%
+  full_join(
+    tier3_variant_count_check,
+    by = c("callset", "PTA_only", "source_group")
+  ) %>%
+  mutate(
+    n_alloc_tbl = dplyr::coalesce(n_alloc_tbl, 0L),
+    n_rowlevel = dplyr::coalesce(n_rowlevel, 0L),
+    count_match = (n_alloc_tbl == n_rowlevel),
+    feasible = step2_num_int <= n_rowlevel
+  ) %>%
+  arrange(callset)
+
+tier3_check_compare
+
+tier3_check_compare %>% dplyr::select(count_match, feasible) %>% table(.)
+
+```
+
+### Tier3 selection
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(readr)
+})
+
+set.seed(STRATIFICATION_SEED)
+
+# 1. Allocation table in the exact stratum order
+tier3_alloc_ordered <- ampli_alloc_tbl %>%
+  dplyr::filter(tier == "tier3") %>%
+  mutate(stratum_order = dplyr::row_number()) %>%
+  dplyr::select(stratum_order, callset, PTA_only, source_group, n, step2_num_int)
+
+# 2. Attach stratum info to row-level tier3 variants
+tier3_variant_tbl2 <- tier3_variant_tbl %>%
+  inner_join(
+    tier3_alloc_ordered %>%
+      dplyr::select(stratum_order, callset, PTA_only, source_group, step2_num_int),
+    by = c("callset", "PTA_only", "source_group")
+  )
+
+# 3. Stratified sampling in the same order
+tier3_sampled <- tier3_alloc_ordered %>%
+  split(.$stratum_order) %>%
+  lapply(function(one_stratum) {
+    this_order <- one_stratum$stratum_order[1]
+    this_callset <- one_stratum$callset[1]
+    this_pta <- one_stratum$PTA_only[1]
+    this_source <- one_stratum$source_group[1]
+    this_n <- one_stratum$step2_num_int[1]
+    
+    tier3_variant_tbl2 %>%
+      dplyr::filter(
+        stratum_order == this_order,
+        callset == this_callset,
+        PTA_only == this_pta,
+        source_group == this_source
+      ) %>%
+      slice_sample(n = this_n) %>%
+      mutate(sampled_n = this_n)
+  }) %>%
+  bind_rows() %>%
+  arrange(stratum_order, chr, pos, ref, alt) %>%
+  dplyr::select(
+    stratum_order,
+    chr, pos, ref, alt,
+    callset, PTA_only, source_group,
+    sampled_n
+  )
+
+tier3_sampled
+
+```
+
+### Tier3 - selection check
+```{r}
+tier3_sampled_check <- tier3_sampled %>%
+  group_by(stratum_order, callset, PTA_only, source_group) %>%
+  dplyr::summarise(n_sampled = dplyr::n(), .groups = "drop") %>%
+  left_join(
+    tier3_alloc_ordered %>%
+      dplyr::select(stratum_order, callset, PTA_only, source_group, step2_num_int),
+    by = c("stratum_order", "callset", "PTA_only", "source_group")
+  ) %>%
+  mutate(match = (n_sampled == step2_num_int)) %>%
+  arrange(stratum_order)
+
+tier3_sampled_check
+
+
+tier3_sampled_check$match %>% table(.)
+```
+
+
+### Tier1, 2, 3 BED format
+### Germline het and refhom randomly selected to BED
+```{r}
+### Tier1 (n=50, non-overlap with chung's) to primer BED
+
+
+library(dplyr)
+library(stringr)
+library(readr)
+library(purrr)
+
+set.seed(STRATIFICATION_SEED)
+
+
+callset_order <- c(
+  "vcf_Illumina",
+  "vcf_ppmSeq_multiread",
+  "vcf_ppmSeq_singleton_HC",
+  "vcf_UDSeq_multiread",
+  "vcf_UDSeq_singleton",
+  "vcf_NanoSeq_multiread",
+  "vcf_NanoSeq_singleton",
+  "vcf_HiDEFseq_double_stranded",
+  "vcf_HiDEFseq_single_stranded",
+  "vcf_PTA_singleton"
+)
+
+tier1_bed <- tier1_selected_annot %>%
+  mutate(
+    start = pos - 20,
+    end   = pos + 20,
+    all_callsets = map2(callset, overlap_partner_callsets, \(x, y) {
+      partners <- str_split(y, ",", simplify = FALSE)[[1]] %>%
+        str_trim()
+      c(x, partners)
+    }),
+    all_callsets = map(all_callsets, \(x) {
+      x %>%
+        str_replace("^call_", "vcf_") %>%
+        unique() %>%
+        .[order(match(., callset_order))]
+    }),
+    name = pmap_chr(
+      list(chr, pos, ref, alt, all_callsets),
+      \(chr, pos, ref, alt, all_callsets) {
+        paste0(
+          chr, "_", pos, "_", ref, "_", alt,
+          "-tier1-",
+          paste(all_callsets, collapse = "-")
+        )
+      }
+    )
+  ) %>%
+  dplyr::select(chr, start, end, name)
+
+
+
+tier2_bed <- tier2_sampled %>%
+  mutate(
+    start = pos - 20,
+    end = pos + 20,
+    callset_vcf = str_replace(callset, "^call_", "vcf_"),
+    name = case_when(
+      PTA_only ~ paste0(
+        chr, "_", pos, "_", ref, "_", alt,
+        "-tier2-",
+        callset_vcf,
+        "-bam_PTA"
+      ),
+      TRUE ~ paste0(
+        chr, "_", pos, "_", ref, "_", alt,
+        "-tier2-",
+        callset_vcf,
+        "-bam_",
+        source_group
+      )
+    )
+  ) %>%
+  dplyr::select(chr, start, end, name)
+
+tier3_bed <- tier3_sampled %>%
+  mutate(
+    start = pos - 20,
+    end = pos + 20,
+    callset_vcf = str_replace(callset, "^call_", "vcf_"),
+    name = paste0(
+      chr, "_", pos, "_", ref, "_", alt,
+      "-tier3-",
+      callset_vcf
+    )
+  ) %>%
+  dplyr::select(chr, start, end, name)
+
+
+prev_id01_ampli <- read_tsv("prev_id01_germline.with_vaf.tsv", show_col_types = FALSE)
+
+het_prev_id01_ampli <- prev_id01_ampli %>%
+    dplyr::filter(
+        CATEGORY == "Het",
+        dplyr::between(ppmseq_vaf, 0.46, 0.54),
+        dplyr::between(illumina_vaf, 0.46, 0.54)
+    )
+hom_prev_id01_ampli <- prev_id01_ampli %>%
+    dplyr::filter(
+        CATEGORY == "Alt_Homo")
+
+
+
+# expected to already exist:
+# - het_prev_id01_ampli
+# - hom_prev_id01_ampli
+# - germ_het_num
+# - germ_althom_num
+
+germline_sampled <- bind_rows(
+  het_prev_id01_ampli %>%
+    slice_sample(n = germ_het_num),
+  hom_prev_id01_ampli %>%
+    slice_sample(n = germ_althom_num)
+)
+
+germline_bed <- germline_sampled %>%
+  mutate(
+    start = POS - 20,
+    end = POS + 20,
+    category_label = case_when(
+      CATEGORY == "Het" ~ "GermlineHeterozygous",
+      CATEGORY == "Alt_Homo" ~ "GermlineRefOrAltHomozygous",
+      TRUE ~ CATEGORY
+    ),
+    name = paste0(
+      CHROM, "_", POS, "_", REF, "_", ALT, "-",
+      category_label
+    )
+  ) %>%
+  dplyr::select(
+    chr = CHROM,
+    start,
+    end,
+    name
+  )
+
+germline_sampled
+germline_bed
+
+
+
+chrom_levels <- c(
+  paste0("chr", 1:22),
+  "chrX"
+)
+
+benchmark_stratified_7614_BLT_ampliseq_panel <- bind_rows(
+  tier1_bed,
+  tier2_bed,
+  tier3_bed,
+  germline_bed
+) %>%
+  mutate(
+    chr = factor(chr, levels = chrom_levels, ordered = TRUE)
+  ) %>%
+  arrange(chr, start) %>%
+  mutate(chr = as.character(chr))
+
+readr::write_tsv(
+  benchmark_stratified_7614_BLT_ampliseq_panel,
+  "benchmark_stratified_7614_BLT_ampliseq_panel_fullcol4.bed",
+  col_names = FALSE
+)
+
+benchmark_stratified_7614_BLT_ampliseq_panel_short <- benchmark_stratified_7614_BLT_ampliseq_panel %>%
+  mutate(
+    name = name %>%
+      stringr::str_replace("-tier1-.*$", "-t1") %>%
+      stringr::str_replace("-tier2-.*$", "-t2") %>%
+      stringr::str_replace("-tier3-.*$", "-t3") %>%
+      stringr::str_replace("-GermlineHeterozygous$", "-het") %>%
+      stringr::str_replace("-GermlineRefOrAltHomozygous$", "-hom")
+  )
+
+readr::write_tsv(
+  benchmark_stratified_7614_BLT_ampliseq_panel_short,
+  "benchmark_stratified_7614_BLT_ampliseq_panel_short.bed",
+  col_names = FALSE
+)
+
+```
+
+
+
+
+### Comparison with Illumina DesignStudio panels
+```{r}
+res_dir <- "design_n780_seed12345/"
+
+long_panel <- read_tsv(paste0(res_dir, "benchmark_stratified_7614_BLT_ampliseq_panel_fullcol4.bed"), col_names = F) %>% setNames(c("chr", "start", "end", "name"))
+short_panel <- read_tsv(paste0(res_dir, "benchmark_stratified_7614_BLT_ampliseq_panel_short.bed"), col_names = F) %>% setNames(c("chr", "start", "end", "short_name"))
+
+full_ampli_design <- long_panel
+full_ampli_design$short_name <- short_panel$short_name
+
+
+designed <- read_tsv(paste0(res_dir,"illumina_result.tsv"))
+designed_joined <- designed %>%
+    left_join(
+        full_ampli_design %>%
+            dplyr::select(short_name, name),
+        by = c("Name" = "short_name")
+    )
+
+ampli_numbers <- read_tsv(paste0(res_dir, "ampliseq_allocation_numbers_by_tier_and_strata.tsv"), show_col_types = FALSE)
+
+submitted_tbl <- designed_joined %>%
+  dplyr::filter(Num_Amplicons == 1) %>%
+  mutate(
+    tier = case_when(
+      str_detect(name, "-tier1-") ~ "tier1",
+      str_detect(name, "-tier2-") ~ "tier2",
+      str_detect(name, "-tier3-") ~ "tier3",
+      str_detect(name, "GermlineRefOrAltHomozygous$") ~ "germline_althom",
+      str_detect(name, "GermlineHeterozygous$") ~ "germline_het",
+      TRUE ~ NA_character_
+    ),
+    callset = case_when(
+      tier == "tier1" ~ "call_shared",
+      tier == "tier2" ~ str_match(name, "-tier2-vcf_(.+)-bam_([^_]+(?:_[^_]+)*)$")[,2],
+      tier == "tier3" ~ str_match(name, "-tier3-vcf_(.+)$")[,2],
+      tier == "germline_althom" ~ "germline_althom",
+      tier == "germline_het" ~ "germline_het",
+      TRUE ~ NA_character_
+    ),
+    source_raw = case_when(
+      tier == "tier2" ~ str_match(name, "-tier2-vcf_(.+)-bam_([^_]+(?:_[^_]+)*)$")[,3],
+      TRUE ~ "."
+    ),
+    PTA_only = case_when(
+      tier == "tier2" & source_raw == "PTA" ~ TRUE,
+      TRUE ~ FALSE
+    ),
+    source_group = case_when(
+      tier == "tier2" & source_raw == "PTA" ~ "PTA_only",
+      tier == "tier2" ~ source_raw,
+      TRUE ~ "."
+    ),
+    callset = if_else(str_starts(callset, "call_") | str_starts(callset, "germline_"),
+                      callset,
+                      paste0("call_", callset))
+  ) %>%
+  dplyr::count(tier, callset, PTA_only, source_group, name = "submitted_num")
+
+ampli_numbers2 <- ampli_numbers %>%
+  left_join(
+    submitted_tbl,
+    by = c("tier", "callset", "PTA_only", "source_group")
+  ) %>%
+  mutate(
+    submitted_num = coalesce(submitted_num, 0L)
+  ) %>%
+  relocate(submitted_num, .after = step2_num_int)
+
+ampli_numbers2
+
+
+ampli_numbers2 %>% write_tsv(., paste0(res_dir, "before_after_ampli_num.tsv"))
+
+```
+
+
+### Comparison with Illumina DesignStudio panels - merged
+```{r}
+res_dir <- "merged_design_n784/"
+
+
+
+long_panel <- read_tsv(paste0(res_dir, "best_ampli_design_n784_stratified_manual.bed"), col_names = F) %>% setNames(c("chr", "start", "end", "name", "seed"))
+short_panel <- read_tsv(paste0(res_dir, "best_ampli_design_n784_stratified_manual.shortname.bed"), col_names = F) %>% setNames(c("chr", "start", "end", "short_name"))
+
+full_ampli_design <- long_panel
+full_ampli_design$short_name <- short_panel$short_name
+
+
+designed <- read_tsv(paste0(res_dir,"illumina_result.tsv"))
+designed_joined <- designed %>%
+    left_join(
+        full_ampli_design %>%
+            dplyr::select(short_name, name),
+        by = c("Name" = "short_name")
+    )
+
+ampli_numbers <- read_tsv(paste0(res_dir, "ampliseq_allocation_numbers_by_tier_and_strata.tsv"), show_col_types = FALSE)
+
+submitted_tbl <- designed_joined %>%
+  dplyr::filter(Num_Amplicons == 1) %>%
+  mutate(
+    tier = case_when(
+      str_detect(name, "-tier1-") ~ "tier1",
+      str_detect(name, "-tier2-") ~ "tier2",
+      str_detect(name, "-tier3-") ~ "tier3",
+      str_detect(name, "GermlineRefOrAltHomozygous$") ~ "germline_althom",
+      str_detect(name, "GermlineHeterozygous$") ~ "germline_het",
+      TRUE ~ NA_character_
+    ),
+    callset = case_when(
+      tier == "tier1" ~ "call_shared",
+      tier == "tier2" ~ str_match(name, "-tier2-vcf_(.+)-bam_([^_]+(?:_[^_]+)*)$")[,2],
+      tier == "tier3" ~ str_match(name, "-tier3-vcf_(.+)$")[,2],
+      tier == "germline_althom" ~ "germline_althom",
+      tier == "germline_het" ~ "germline_het",
+      TRUE ~ NA_character_
+    ),
+    source_raw = case_when(
+      tier == "tier2" ~ str_match(name, "-tier2-vcf_(.+)-bam_([^_]+(?:_[^_]+)*)$")[,3],
+      TRUE ~ "."
+    ),
+    PTA_only = case_when(
+      tier == "tier2" & source_raw == "PTA" ~ TRUE,
+      TRUE ~ FALSE
+    ),
+    source_group = case_when(
+      tier == "tier2" & source_raw == "PTA" ~ "PTA_only",
+      tier == "tier2" ~ source_raw,
+      TRUE ~ "."
+    ),
+    callset = if_else(str_starts(callset, "call_") | str_starts(callset, "germline_"),
+                      callset,
+                      paste0("call_", callset))
+  ) %>%
+  dplyr::count(tier, callset, PTA_only, source_group, name = "submitted_num")
+
+ampli_numbers2 <- ampli_numbers %>%
+  left_join(
+    submitted_tbl,
+    by = c("tier", "callset", "PTA_only", "source_group")
+  ) %>%
+  mutate(
+    submitted_num = coalesce(submitted_num, 0L)
+  ) %>%
+  relocate(submitted_num, .after = step2_num_int)
+
+ampli_numbers2
+
+
+ampli_numbers2 %>% write_tsv(., paste0(res_dir, "before_after_ampli_num.tsv"))
+
+```
+
+
+```{r}
+library(dplyr)
+library(readr)
+library(stringr)
+library(purrr)
+
+files <- c(
+  "design_n780_seed42/before_after_ampli_num.tsv",
+  "design_n780_seed123/before_after_ampli_num.tsv",
+  "design_n780_seed2026/before_after_ampli_num.tsv",
+  "design_n780_seed12345/before_after_ampli_num.tsv"
+)
+
+seed_order <- c("42", "123", "2026", "12345")
+
+# Canonical stratum order from the first TSV
+stratum_order_tbl <- readr::read_tsv(files[1], show_col_types = FALSE) %>%
+  mutate(stratum_order = dplyr::row_number()) %>%
+  dplyr::select(stratum_order, tier, callset, PTA_only, source_group)
+
+# Read all files
+dat_all <- purrr::map_dfr(files, function(f) {
+  seed_now <- stringr::str_extract(f, "seed[0-9]+") %>%
+    stringr::str_remove("seed")
+
+  readr::read_tsv(f, show_col_types = FALSE) %>%
+    mutate(
+      seed = seed_now,
+      submitted_num = as.integer(submitted_num),
+      step2_num_int = as.integer(step2_num_int),
+      design_rate_num = dplyr::if_else(step2_num_int == 0, NA_real_, submitted_num / step2_num_int)
+    ) %>%
+    left_join(stratum_order_tbl, by = c("tier", "callset", "PTA_only", "source_group"))
+})
+
+# Summarise by stratum
+best_by_stratum <- dat_all %>%
+  mutate(seed = factor(seed, levels = seed_order)) %>%
+  group_by(stratum_order, tier, callset, PTA_only, source_group) %>%
+  summarise(
+    step2_num_int = dplyr::first(step2_num_int),
+    submitted_num = paste(submitted_num[order(seed)], collapse = "_"),
+    max_rate = suppressWarnings(max(design_rate_num, na.rm = TRUE)),
+    best_seed = {
+      mr <- suppressWarnings(max(design_rate_num, na.rm = TRUE))
+      if (is.infinite(mr)) {
+        "."
+      } else {
+        paste(as.character(seed[design_rate_num == mr]), collapse = "_")
+      }
+    },
+    best_design_rate = {
+      mr <- suppressWarnings(max(design_rate_num, na.rm = TRUE))
+      if (is.infinite(mr)) "." else sprintf("%.6f", mr)
+    },
+    .groups = "drop"
+  ) %>%
+  arrange(stratum_order) %>%
+  mutate(
+    PTA_only = as.character(PTA_only),
+    step2_num_int = as.character(step2_num_int)
+  ) %>%
+  dplyr::select(
+    tier,
+    callset,
+    PTA_only,
+    source_group,
+    step2_num_int,
+    submitted_num,
+    best_seed,
+    best_design_rate
+  )
+
+print(best_by_stratum, n = Inf)
+
+readr::write_tsv(best_by_stratum, "best_seed_by_stratum.tsv", na = "")
+```
+
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(purrr)
+})
+
+set.seed(1)
+
+callsets_use <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  "call_ppmSeq_singleton_HC",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_PTA_singleton"
+)
+
+filt2 <- filt %>%
+  mutate(
+    variant_key = paste(chr, pos, ref, alt, sep = ":")
+  )
+
+tier3_candidates <- purrr::map_dfr(callsets_use, function(cs) {
+  
+  other_call_cols <- setdiff(call_cols_full_depth, cs)
+  self_exist_col_full <- get_self_exist_cols_full_altge1(cs)
+  other_exist_cols_full <- setdiff(exist_cols_full_altge1, self_exist_col_full)
+  
+  self_called <- filt2[[cs]] == 1
+  other_called_n <- rowSums(as.data.frame(filt2[, other_call_cols, drop = FALSE]), na.rm = TRUE)
+  other_exist_n_full <- rowSums(as.data.frame(filt2[, other_exist_cols_full, drop = FALSE]), na.rm = TRUE)
+  
+  idx <- self_called &
+    (other_called_n == 0) &
+    (other_exist_n_full == 0) &
+    (filt2$chung_ampli_BLT_mosaic == 0)
+  
+  filt2[idx, , drop = FALSE] %>%
+    transmute(
+      chr,
+      pos,
+      ref,
+      alt,
+      variant_key,
+      callset = cs
+    ) %>%
+    distinct()
+})
+
+tier3_selected <- tier3_candidates %>%
+  group_by(callset) %>%
+  slice_sample(prop = 1) %>%
+  slice_head(n = 20) %>%
+  ungroup() %>%
+  arrange(callset, chr, pos, ref, alt)
+
+tier3_selected_summary <- tier3_candidates %>%
+  count(callset, name = "avail_n") %>%
+  left_join(
+    tier3_selected %>% count(callset, name = "selected_n"),
+    by = "callset"
+  ) %>%
+  mutate(
+    selected_n = dplyr::coalesce(selected_n, 0L)
+  ) %>%
+  arrange(avail_n)
+
+tier3_selected
+tier3_selected_summary
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(stringr)
+  library(UpSetR)
+})
+
+# ---- Build matrix for UpSetR (missing cols -> 0) ----
+make_mat_strata <- function(df, cols) {
+  out <- lapply(cols, function(x) {
+    if (x %in% colnames(df)) as.integer(df[[x]] %in% 1) else rep(0L, nrow(df))
+  })
+  mat <- as.data.frame(out, check.names = FALSE)
+  colnames(mat) <- cols
+  rownames(mat) <- NULL
+  mat
+}
+
+# ---- Tier1 rows: called by >= 2 VCF callsets ----
+tier1_idx <- rowSums(as.data.frame(tiering_df[, call_cols_full_depth, drop = FALSE]), na.rm = TRUE) >= 2
+
+filt_tier1 <- tiering_df[tier1_idx, , drop = FALSE]
+
+cat("Tier1 rows:", nrow(filt_tier1), "\n")
+
+# ---- UpSet input ----
+mat_calls_tier1 <- make_mat_strata(filt_tier1, call_cols_full_depth)
+
+# Optional prettier labels
+colnames(mat_calls_tier1) <- str_replace(colnames(mat_calls_tier1), "^call_", "")
+
+# ---- Plot ----
+upset(
+  mat_calls_tier1,
+  nsets = ncol(mat_calls_tier1),
+  nintersects = 200,
+  keep.order = TRUE,
+  order.by = "freq",
+  mainbar.y.label = "Tier1 intersection size",
+  sets.x.label = "Tier1 set size"
+)
+
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(stringr)
+  library(ggplot2)
+  library(ComplexUpset)
+})
+
+call_cols_full_depth <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  "call_ppmSeq_singleton_HC",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+# ---- Tier1 rows: called by >= 2 VCF callsets ----
+tier1_idx <- rowSums(as.data.frame(tiering_df[, call_cols_full_depth, drop = FALSE]), na.rm = TRUE) >= 2
+
+filt_tier1 <- tiering_df[tier1_idx, , drop = FALSE] %>%
+  mutate(
+    chung_group = ifelse(chung_ampli_BLT_mosaic == 1, "B-L-T_chung_et_al_2024", "new")
+  )
+
+cat("Tier1 rows:", nrow(filt_tier1), "\n")
+
+# ---- make 0/1 logical columns for ComplexUpset ----
+plot_df <- filt_tier1 %>%
+  mutate(across(all_of(call_cols_full_depth), ~ .x %in% 1)) %>%
+  rename_with(~ str_replace(.x, "^call_", ""), all_of(call_cols_full_depth))
+
+plot_sets <- str_replace(call_cols_full_depth, "^call_", "")
+
+# ---- stacked upset ----
+upset(
+  plot_df,
+  intersect = plot_sets,
+  sort_intersections_by = "cardinality",
+  sort_sets = FALSE,
+  base_annotations = list(
+    "Tier1 intersection size" = (
+      ggplot(mapping = aes(fill = chung_group)) +
+        geom_bar(stat = "count", position = "stack") +
+        geom_text(
+          stat = "count",
+          aes(label = after_stat(count)),
+          position = position_stack(vjust = 0.5),
+          size = 3
+        ) +
+        labs(y = "Tier1 intersection size", fill = NULL)
+    )
+  ),
+  width_ratio = 0.2
+)
+```
+
+### PTA-including tier2
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(purrr)
+  library(stringr)
+  library(ggplot2)
+})
+
+call_cols_full_depth <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  "call_ppmSeq_singleton_HC",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+exist_pretty_map <- c(
+  "is_altge1_ILLUMINA" = "ILLUMINA",
+  "is_altge1_DUPLEX_PPMSEQ" = "PPMSEQ",
+  "is_altge1_DUPLEX_UDSEQ" = "UDSEQ",
+  "is_altge1_DUPLEX_NANOSEQ" = "NANOSEQ",
+  "is_altge1_DUPLEX_HIDEFSEQ" = "HIDEFSEQ",
+  "existing_any_PTA1_16" = "PTA"
+)
+
+tier2_new_source_df <- purrr::map_dfr(call_cols_full_depth, function(cs) {
+  
+  other_call_cols <- setdiff(call_cols_full_depth, cs)
+  self_exist_col <- get_self_exist_cols_full_altge1(cs)
+  other_exist_cols <- setdiff(exist_cols_full_altge1, self_exist_col)
+  
+  self_called <- filt[[cs]] == 1
+  other_called_n <- rowSums(as.data.frame(filt[, other_call_cols, drop = FALSE]), na.rm = TRUE)
+  other_exist_mat <- as.data.frame(filt[, other_exist_cols, drop = FALSE])
+  other_exist_n <- rowSums(other_exist_mat, na.rm = TRUE)
+  
+  idx_tier2_new <- self_called &
+    (other_called_n == 0) &
+    (other_exist_n >= 1) &
+    (filt$chung_ampli_BLT_mosaic  != 1)
+  
+  if (sum(idx_tier2_new, na.rm = TRUE) == 0) {
+    return(tibble(callset = cs, source = character(0), n = integer(0)))
+  }
+  
+  src_class <- apply(other_exist_mat[idx_tier2_new, , drop = FALSE], 1, function(x) {
+    hit_cols <- names(x)[which(x >= 1)]
+    if (length(hit_cols) >= 2) {
+      "MULTIPLE"
+    } else {
+      unname(exist_pretty_map[hit_cols])
+    }
+  })
+  
+  tibble(callset = cs, source = src_class) %>%
+    dplyr::count(callset, source, name = "n")
+})
+
+
+tier2_new_source_df <- tier2_new_source_df %>%
+  mutate(
+    source = factor(
+      source,
+      levels = c("MULTIPLE", "ILLUMINA", "PPMSEQ", "UDSEQ", "NANOSEQ", "HIDEFSEQ", "PTA")
+    )
+  )
+
+
+source_levels <- c("MULTIPLE", "ILLUMINA", "PPMSEQ", "UDSEQ", "NANOSEQ", "HIDEFSEQ", "PTA")
+
+# self source mapping
+callset_to_source <- c(
+  "call_Illumina" = "ILLUMINA",
+  "call_ppmSeq_multiread" = "PPMSEQ",
+  "call_ppmSeq_singleton_HC" = "PPMSEQ",
+  "call_UDSeq_multiread" = "UDSEQ",
+  "call_UDSeq_singleton" = "UDSEQ",
+  "call_NanoSeq_multiread" = "NANOSEQ",
+  "call_NanoSeq_singleton" = "NANOSEQ",
+  "call_HiDEFseq_double_stranded" = "HIDEFSEQ",
+  "call_HiDEFseq_single_stranded" = "HIDEFSEQ",
+  "call_PTA_singleton" = "PTA"
+)
+
+allowed_grid <- tidyr::expand_grid(
+  callset = call_cols_full_depth,
+  source = source_levels
+) %>%
+  mutate(
+    self_source = unname(callset_to_source[as.character(callset)])
+  ) %>%
+  dplyr::filter(source != self_source) %>%
+  dplyr::select(-self_source)
+
+tier2_new_source_df2 <- allowed_grid %>%
+  left_join(
+    tier2_new_source_df %>%
+      mutate(
+        callset = as.character(callset),
+        source = as.character(source)
+      ),
+    by = c("callset", "source")
+  ) %>%
+  mutate(
+    n = dplyr::coalesce(n, 0L),
+    callset = factor(callset, levels = call_cols_full_depth),
+    source = factor(source, levels = source_levels)
+  ) %>%
+  arrange(callset, source)
+
+tier2_new_source_df2
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(purrr)
+  library(stringr)
+  library(tidyr)
+})
+
+call_cols_full_depth <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  "call_ppmSeq_singleton_HC",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+exist_pretty_map <- c(
+  "is_altge1_ILLUMINA" = "ILLUMINA",
+  "is_altge1_DUPLEX_PPMSEQ" = "PPMSEQ",
+  "is_altge1_DUPLEX_UDSEQ" = "UDSEQ",
+  "is_altge1_DUPLEX_NANOSEQ" = "NANOSEQ",
+  "is_altge1_DUPLEX_HIDEFSEQ" = "HIDEFSEQ",
+  "existing_any_PTA1_16" = "PTA"
+)
+
+source_levels <- c("ILLUMINA", "PPMSEQ", "UDSEQ", "NANOSEQ", "HIDEFSEQ", "PTA")
+
+callset_to_source <- c(
+  "call_Illumina" = "ILLUMINA",
+  "call_ppmSeq_multiread" = "PPMSEQ",
+  "call_ppmSeq_singleton_HC" = "PPMSEQ",
+  "call_UDSeq_multiread" = "UDSEQ",
+  "call_UDSeq_singleton" = "UDSEQ",
+  "call_NanoSeq_multiread" = "NANOSEQ",
+  "call_NanoSeq_singleton" = "NANOSEQ",
+  "call_HiDEFseq_double_stranded" = "HIDEFSEQ",
+  "call_HiDEFseq_single_stranded" = "HIDEFSEQ",
+  "call_PTA_singleton" = "PTA"
+)
+
+tier2_new_source_combo_df <- purrr::map_dfr(call_cols_full_depth, function(cs) {
+  
+  other_call_cols <- setdiff(call_cols_full_depth, cs)
+  self_exist_col <- get_self_exist_cols_full_altge1(cs)
+  other_exist_cols <- setdiff(exist_cols_full_altge1, self_exist_col)
+  
+  self_called <- filt[[cs]] == 1
+  other_called_n <- rowSums(as.data.frame(filt[, other_call_cols, drop = FALSE]), na.rm = TRUE)
+  other_exist_mat <- as.data.frame(filt[, other_exist_cols, drop = FALSE])
+  other_exist_n <- rowSums(other_exist_mat, na.rm = TRUE)
+  
+  idx_tier2_new <- self_called &
+    (other_called_n == 0) &
+    (other_exist_n >= 1) &
+    (filt$chung_ampli_BLT_mosaic != 1)
+  
+  if (sum(idx_tier2_new, na.rm = TRUE) == 0) {
+    return(tibble(callset = character(0), source_combo = character(0), n = integer(0)))
+  }
+  
+  combo_vec <- apply(other_exist_mat[idx_tier2_new, , drop = FALSE], 1, function(x) {
+    hit_cols <- names(x)[which(x >= 1)]
+    hit_sources <- unname(exist_pretty_map[hit_cols]) %>%
+      unique() %>%
+      .[order(match(., source_levels))]
+    
+    paste(hit_sources, collapse = "+")
+  })
+  
+  tibble(
+    callset = cs,
+    source_combo = combo_vec
+  ) %>%
+    dplyr::count(callset, source_combo, name = "n") %>%
+    arrange(callset, desc(n), source_combo)
+})
+
+tier2_new_source_combo_df <- tier2_new_source_combo_df %>%
+  mutate(
+    has_PTA = str_detect(source_combo, "(^|\\+)PTA($|\\+)"),
+    n_sources = str_count(source_combo, "\\+") + 1
+  )
+
+tier2_new_source_combo_df
+```
+
+```{r}
+tier2_new_source_considerPTA_df %>% write_tsv("case1_lowci_stratum.tsv")
+altge1_tier2_new_source_considerPTA_df %>% write_tsv("case2_altge1_stratum.tsv")
+
+
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(purrr)
+  library(stringr)
+  library(ggplot2)
+  library(tidyr)
+})
+
+call_cols_full_depth <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  "call_ppmSeq_singleton_HC",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+# Use ONLY non-PTA exist columns for source calculation
+exist_cols_source_noPTA <- c(
+  "is_altge1_ILLUMINA",
+  "is_altge1_DUPLEX_PPMSEQ",
+  "is_altge1_DUPLEX_UDSEQ",
+  "is_altge1_DUPLEX_NANOSEQ",
+  "is_altge1_DUPLEX_HIDEFSEQ"
+)
+
+
+exist_pretty_map_noPTA <- c(
+  "is_altge1_ILLUMINA" = "ILLUMINA",
+  "is_altge1_DUPLEX_PPMSEQ" = "PPMSEQ",
+  "is_altge1_DUPLEX_UDSEQ" = "UDSEQ",
+  "is_altge1_DUPLEX_NANOSEQ" = "NANOSEQ",
+  "is_altge1_DUPLEX_HIDEFSEQ" = "HIDEFSEQ"
+)
+
+tier2_new_source_df_noPTA <- purrr::map_dfr(call_cols_full_depth, function(cs) {
+  
+  other_call_cols <- setdiff(call_cols_full_depth, cs)
+  self_exist_col <- get_self_exist_cols_noPTA(cs)
+  other_exist_cols <- setdiff(exist_cols_source_noPTA, self_exist_col)
+  
+  self_called <- filt[[cs]] == 1
+  other_called_n <- rowSums(as.data.frame(filt[, other_call_cols, drop = FALSE]), na.rm = TRUE)
+  other_exist_mat <- as.data.frame(filt[, other_exist_cols, drop = FALSE])
+  other_exist_n <- rowSums(other_exist_mat, na.rm = TRUE)
+  
+  idx_tier2_new <- self_called &
+    (other_called_n == 0) &
+    (other_exist_n >= 1) &
+    (filt$chung_ampli_BLT_mosaic  != 1)
+  
+  if (sum(idx_tier2_new, na.rm = TRUE) == 0) {
+    return(tibble(callset = cs, source = character(0), n = integer(0)))
+  }
+  
+  src_class <- apply(other_exist_mat[idx_tier2_new, , drop = FALSE], 1, function(x) {
+    hit_cols <- names(x)[which(x >= 1)]
+    if (length(hit_cols) >= 2) {
+      "MULTIPLE"
+    } else {
+      unname(exist_pretty_map_noPTA[hit_cols])
+    }
+  })
+  
+  tibble(callset = cs, source = src_class) %>%
+    dplyr::count(callset, source, name = "n")
+})
+
+tier2_new_source_df_noPTA <- tier2_new_source_df_noPTA %>%
+  mutate(
+    source = factor(
+      source,
+      levels = c("MULTIPLE", "ILLUMINA", "PPMSEQ", "UDSEQ", "NANOSEQ", "HIDEFSEQ")
+    )
+  )
+
+source_levels_noPTA <- c("MULTIPLE", "ILLUMINA", "PPMSEQ", "UDSEQ", "NANOSEQ", "HIDEFSEQ")
+
+# PTA intentionally omitted here because it is not a source category in noPTA mode
+callset_to_source_noPTA <- c(
+  "call_Illumina" = "ILLUMINA",
+  "call_ppmSeq_multiread" = "PPMSEQ",
+  "call_ppmSeq_singleton_HC" = "PPMSEQ",
+  "call_UDSeq_multiread" = "UDSEQ",
+  "call_UDSeq_singleton" = "UDSEQ",
+  "call_NanoSeq_multiread" = "NANOSEQ",
+  "call_NanoSeq_singleton" = "NANOSEQ",
+  "call_HiDEFseq_double_stranded" = "HIDEFSEQ",
+  "call_HiDEFseq_single_stranded" = "HIDEFSEQ"
+)
+
+allowed_grid_noPTA <- tidyr::expand_grid(
+  callset = call_cols_full_depth,
+  source = source_levels_noPTA
+) %>%
+  mutate(
+    self_source = unname(callset_to_source_noPTA[as.character(callset)])
+  ) %>%
+  dplyr::filter(is.na(self_source) | source != self_source) %>%
+  dplyr::select(-self_source)
+
+tier2_new_source_df2_noPTA <- allowed_grid_noPTA %>%
+  left_join(
+    tier2_new_source_df_noPTA %>%
+      mutate(
+        callset = as.character(callset),
+        source = as.character(source)
+      ),
+    by = c("callset", "source")
+  ) %>%
+  mutate(
+    n = dplyr::coalesce(n, 0L),
+    callset = factor(callset, levels = call_cols_full_depth),
+    source = factor(source, levels = source_levels_noPTA)
+  ) %>%
+  arrange(callset, source)
+
+tier2_new_source_df2_noPTA
+```
+
+```{r}
+ggplot(tier2_new_source_df2, aes(x = callset, y = n, fill = source)) +
+  geom_col(position = "fill", width = 0.8) +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Fraction",
+    fill = "Other BAM evidence source"
+  ) +
+  theme_bw(base_size = 12)
+
+
+ggplot(tier2_new_source_df2_noPTA, aes(x = callset, y = n, fill = source)) +
+  geom_col(position = "fill", width = 0.8) +
+  coord_flip() +
+  labs(
+    x = NULL,
+    y = "Fraction",
+    fill = "Other BAM evidence source"
+  ) +
+  theme_bw(base_size = 12)
+
+```
+
+
+### Filtering profile
+```{r}
+library(grid)
+
+
+call_cols_full_depth <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  "call_ppmSeq_singleton_HC",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+no_black <- raw %>%
+  dplyr::filter(
+    blacklist_any==0,
+    gnomad_common==0,
+    in_hmer7==0,
+    in_simple_repeats_ucsc==0
+  )
+
+count_calls <- function(df, call_cols){
+  df %>%
+    summarise(
+      dplyr::across(dplyr::all_of(call_cols), ~ sum(.x==1, na.rm=TRUE))
+    )
+}
+
+# ---- Step0: before filtering ----
+cnt0 <- count_calls(no_black, call_cols_full_depth)
+
+# ---- Germline filter (is_germline + any germline_like) ----
+gll_cols <- colnames(no_black)[stringr::str_detect(
+  colnames(no_black),
+  "^is_germline_like_upper_ci_052_"
+)]
+
+after_germline <- no_black %>%
+  dplyr::filter(
+    !(is_germline==1 |
+      rowSums(dplyr::across(dplyr::all_of(gll_cols), ~ as.integer(.x==1)), na.rm=TRUE) > 0)
+  )
+
+cnt1 <- count_calls(after_germline, call_cols_full_depth)
+
+# ---- Unrelated filter ----
+after_unrelated_pon <- after_germline %>%
+  dplyr::filter(existing_in_unrelated==0)
+  #dplyr::filter(altge1_in_unrelated==0)
+
+cnt2 <- count_calls(after_unrelated_pon, call_cols_full_depth)
+
+# ---- Final table (rows = callset) ----
+out2 <- dplyr::bind_rows(
+  cnt0 %>% mutate(stage="before_filter"),
+  cnt1 %>% mutate(stage="after_germline"),
+  cnt2 %>% mutate(stage="after_unrelated_pon")
+) %>%
+  tidyr::pivot_longer(-stage, names_to="callset", values_to="n") %>%
+  tidyr::pivot_wider(names_from=stage, values_from=n) %>%
+  dplyr::select(
+    callset,
+    before_filter,
+    after_germline,
+    after_unrelated_pon
+  )
+
+out2
+
+
+viz_rel_stacked <- out2 %>%
+  dplyr::mutate(callset = factor(callset, levels = rev(out2$callset))) %>%
+  dplyr::rename(
+    before = before_filter,
+    after_germline = after_germline,
+    after_pon = after_unrelated_pon
+  ) %>%
+  dplyr::mutate(
+    removed_germline = (before - after_germline) / before,
+    removed_unrelated_pon      = (after_germline - after_pon) / before,
+    kept             = after_pon / before
+  ) %>%
+  dplyr::select(callset, removed_germline, removed_unrelated_pon, kept) %>%
+  tidyr::pivot_longer(
+    -callset,
+    names_to = "component",
+    values_to = "prop"
+  ) %>%
+  dplyr::mutate(
+    component = factor(
+      component,
+      levels = c("removed_germline", "removed_unrelated_pon", "kept")
+    )
+  )
+
+new_lev <- viz_rel_stacked$callset %>% levels(.) %>% str_replace_all(., "^call_", "")
+viz_rel_stacked$callset <- viz_rel_stacked$callset %>% str_replace_all(., "^call_", "")
+viz_rel_stacked$callset <- factor(viz_rel_stacked$callset, levels = new_lev)
+
+
+lab_df <- viz_rel_stacked %>%
+  dplyr::mutate(component = as.character(component)) %>%
+  dplyr::group_by(callset) %>%
+  dplyr::arrange(match(component, c("kept", "removed_unrelated_pon", "removed_germline")), .by_group = TRUE) %>%
+  dplyr::mutate(
+    y_center = cumsum(prop) - prop / 2,
+    y_edge   = cumsum(prop),
+    y_line   = y_edge + 0.010,
+    y_label  = y_edge + 0.028,
+    label = ifelse(
+      prop >= 0.03,
+      scales::percent(prop, accuracy = 0.1),
+      scales::percent(prop, accuracy = 0.01)
+    )
+  ) %>%
+  dplyr::ungroup()
+
+ggplot(viz_rel_stacked, aes(x = callset, y = prop, fill = component)) +
+  geom_col(width = 0.75) +
+
+  # inside
+  geom_text(
+    data = lab_df %>% dplyr::filter(prop >= 0.03),
+    aes(x = callset, y = y_center, label = label),
+    inherit.aes = FALSE,
+    size = 2.5
+  ) +
+
+  # thin connector line
+  geom_segment(
+    data = lab_df %>% dplyr::filter(prop < 0.03, prop > 0),
+    aes(x = callset, xend = callset, y = y_edge, yend = y_line),
+    inherit.aes = FALSE,
+    linewidth = 0.3
+  ) +
+
+  # label
+  geom_text(
+    data = lab_df %>% dplyr::filter(prop < 0.03, prop > 0),
+    aes(x = callset, y = y_label, label = label),
+    inherit.aes = FALSE,
+    hjust = 0,
+    size = 2.4
+  ) +
+
+  coord_flip(clip = "off") +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    expand = expansion(mult = c(0, 0.10))
+  ) +
+  theme_classic() +
+  labs(x = NULL, y = "Proportion (%)")
+```
+
+```{r}
+# nogerm -> filt : per-call counts (order = call_cols_full_depth 유지)
+
+count_calls <- function(df, call_cols){
+  df %>%
+    summarise(dplyr::across(dplyr::all_of(call_cols), ~ sum(.x==1, na.rm=TRUE)))
+}
+
+cnt_before <- count_calls(nogerm, call_cols_full_depth) %>%
+  mutate(stage = "before_unrelated")
+
+cnt_after <- count_calls(filt, call_cols_full_depth) %>%
+  mutate(stage = "after_unrelated")
+
+unrelated_call_profile <- dplyr::bind_rows(cnt_before, cnt_after) %>%
+  tidyr::pivot_longer(-stage, names_to = "callset", values_to = "n") %>%
+  tidyr::pivot_wider(names_from = stage, values_from = n) %>%
+  dplyr::mutate(
+    removed = before_unrelated - after_unrelated,
+    removed_frac = dplyr::if_else(
+      before_unrelated > 0,
+      removed / before_unrelated,
+      NA_real_
+    ),
+    callset = factor(callset, levels = call_cols_full_depth)
+  ) %>%
+  dplyr::arrange(callset)
+
+unrelated_call_profile
+
+
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+platform_tokens <- list(
+  call_Illumina = c(
+    "ILLUMINA_6566_BLOOD",
+    "ILLUMINA_6566_SPERM",
+    "HG19_ILLUMINA_7669"
+  ),
+  call_ppmSeq_multiread = "DUPLEX_PPMSEQ_6566",
+  call_ppmSeq_putative_multiread = "DUPLEX_PPMSEQ_6566",
+  call_ppmSeq_singleton_HC = "DUPLEX_PPMSEQ_6566",
+  call_UDSeq_multiread = "DUPLEX_UDSEQ_6566",
+  call_UDSeq_singleton = "DUPLEX_UDSEQ_6566",
+  call_NanoSeq_multiread = "DUPLEX_NANOSEQ_6566",
+  call_NanoSeq_singleton = "DUPLEX_NANOSEQ_6566",
+  call_PTA_singleton = c(
+    "HG19_PTA_6566_1",
+    "HG19_PTA_6566_2",
+    "HG19_PTA_8420_1",
+    "HG19_PTA_8420_2"
+  ),
+  call_PTA_multiple = c(
+    "HG19_PTA_6566_1",
+    "HG19_PTA_6566_2",
+    "HG19_PTA_8420_1",
+    "HG19_PTA_8420_2"
+  )
+)
+
+platform_fdr <- lapply(call_cols_full_depth, function(cc){
+
+  df_call <- nogerm %>%
+    dplyr::filter(.data[[cc]] == 1)
+
+  total_calls <- nrow(df_call)
+
+  tokens_use <- platform_tokens[[cc]]
+
+  df_token_hits <- df_call %>%
+    tidyr::separate_rows(existing_in_unrelated_which, sep = ",") %>%
+    dplyr::mutate(token = str_trim(existing_in_unrelated_which)) %>%
+    #tidyr::separate_rows(altge1_in_unrelated_which, sep = ",") %>%
+    #dplyr::mutate(token = str_trim(altge1_in_unrelated_which)) %>%
+    dplyr::filter(token %in% tokens_use) %>%
+    dplyr::distinct(chr, pos, ref, alt, token)
+
+  df_token_hits %>%
+    dplyr::count(token, name = "n_hit") %>%
+    dplyr::mutate(
+      callset = cc,
+      total_calls = total_calls,
+      FDR = n_hit / total_calls
+    )
+
+}) %>%
+  dplyr::bind_rows()
+
+platform_fdr %>% dplyr::select(callset, total_calls, token, n_hit, FDR)
+
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+
+maf_map <- list(
+  call_Illumina = "ILLUMINA_MAF",
+  call_ppmSeq_multiread = "DUPLEX_PPMSEQ_MAF",
+  call_ppmSeq_singleton_HC = "DUPLEX_PPMSEQ_MAF",
+  call_UDSeq_multiread = "DUPLEX_UDSEQ_MAF",
+  call_UDSeq_singleton = "DUPLEX_UDSEQ_MAF",
+  call_NanoSeq_multiread = "DUPLEX_NANOSEQ_MAF",
+  call_NanoSeq_singleton = "DUPLEX_NANOSEQ_MAF",
+  call_HiDEFseq_double_stranded = "DUPLEX_HIDEFSEQ_MAF",
+  call_HiDEFseq_single_stranded = "DUPLEX_HIDEFSEQ_MAF"
+)
+
+maf_plot_df <- lapply(names(maf_map), function(cc){
+
+  maf_col <- maf_map[[cc]]
+
+  nogerm %>%
+    dplyr::filter(.data[[cc]] == 1) %>%
+    dplyr::mutate(
+      callset = stringr::str_replace(cc, "^call_", ""),
+      group = ifelse(existing_in_unrelated == 1,
+                     "unrelated_pon_removed",
+                     "kept"),
+      MAF = .data[[maf_col]]
+    ) %>%
+    dplyr::select(callset, group, MAF)
+
+}) %>%
+  dplyr::bind_rows() %>%
+  dplyr::filter(!is.na(MAF), MAF > 0, MAF <= 0.3)
+
+maf_plot_df$callset <- maf_plot_df$callset %>% factor(., levels=unique(maf_plot_df$callset))
+
+ggplot(maf_plot_df,
+       aes(x = MAF, fill = group)) +
+  geom_histogram(aes(y = ..density..),
+                 bins = 120,
+                 alpha = 0.45,
+                 position = "identity",
+                 color = NA) +
+  facet_wrap(~callset, scales = "free_y", ncol = 1) +
+  scale_fill_manual(values = c(
+    "kept" = "#4C72B0",
+    "unrelated_pon_removed" = "#D62728"
+  )) +
+  theme_classic(base_size = 13) +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold"),
+    legend.title = element_blank()
+  ) +
+  labs(
+    x = "Platform-specific BAM MAF (0–0.3)",
+    y = "Density"
+  )
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+
+existing_cols_full <- colnames(nogerm)[
+  str_detect(colnames(nogerm), "^is_existing_lower_ci_0001_") &
+  !str_detect(colnames(nogerm), "30[xX]|100[xX]|200[xX]")
+]
+
+
+
+self_existing_map <- list(
+  call_Illumina = "is_existing_lower_ci_0001_ILLUMINA",
+  call_ppmSeq_multiread = "is_existing_lower_ci_0001_DUPLEX_PPMSEQ",
+  call_ppmSeq_singleton_HC = "is_existing_lower_ci_0001_DUPLEX_PPMSEQ",
+  call_UDSeq_multiread = "is_existing_lower_ci_0001_DUPLEX_UDSEQ",
+  call_UDSeq_singleton = "is_existing_lower_ci_0001_DUPLEX_UDSEQ",
+  call_NanoSeq_multiread = "is_existing_lower_ci_0001_DUPLEX_NANOSEQ",
+  call_NanoSeq_singleton = "is_existing_lower_ci_0001_DUPLEX_NANOSEQ",
+  call_HiDEFseq_double_stranded = "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ",
+  call_HiDEFseq_single_stranded = "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ",
+  call_PTA_singleton = "existing_any_PTA1_16"
+)
+
+overlap_df <- lapply(names(self_existing_map), function(cc){
+
+  self_col <- self_existing_map[[cc]]
+
+  # 모든 other BAM existing columns (자기 자신 제외)
+  other_cols <- setdiff(existing_cols_full, self_col)
+
+  # PTA는 existing_any_PTA1_16도 other evidence로 간주
+  other_cols_all <- setdiff(c(existing_cols_full, "existing_any_PTA1_16"), self_col)
+
+  nogerm %>%
+    dplyr::filter(.data[[cc]] == 1) %>%
+    dplyr::mutate(
+      callset = stringr::str_replace(cc, "^call_", ""),
+      group = ifelse(existing_in_unrelated == 1,
+                     "unrelated_pon_removed",
+                     "kept"),
+      overlap_count = rowSums(dplyr::across(all_of(other_cols_all)) == 1,
+                              na.rm = TRUE)
+    ) %>%
+    dplyr::select(callset, group, overlap_count)
+
+}) %>%
+  dplyr::bind_rows()
+
+
+
+overlap_df$callset <- factor(
+  overlap_df$callset,
+  levels = stringr::str_replace(names(self_existing_map), "^call_", "")
+)
+
+ggplot(overlap_df,
+       aes(x = group, y = overlap_count, fill = group)) +
+  geom_violin(trim = TRUE, scale = "width", alpha = 0.7) +
+  geom_boxplot(width = 0.15, outlier.size = 0.4, color = "black") +
+  facet_wrap(~callset, ncol = 1, scales = "free_y") +
+  scale_fill_manual(values = c(
+    "kept" = "#4C72B0",
+    "unrelated_pon_removed" = "#D62728"
+  )) +
+  theme_classic(base_size = 13) +
+  theme(
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold"),
+    legend.position = "none"
+  ) +
+  labs(
+    x = NULL,
+    y = "Number of other-platform BAM-level overlaps"
+  )
+
+```
+
+
+```{r}
+# Full-depth only: call_cols_full_depth
+# - Source decomposition: platform-only vs multi-platform (within unrelated-hit variants)
+# - FDR per token: fraction of ALL calls hit by each unrelated token
+
+library(dplyr)
+library(tidyr)
+library(stringr)
+
+tokens <- c(
+  "DUPLEX_NANOSEQ_6566",
+  "DUPLEX_PPMSEQ_6566",
+  "DUPLEX_UDSEQ_6566",
+  "HG19_ILLUMINA_7669",
+  "HG19_PTA_6566_1",
+  "HG19_PTA_6566_2",
+  "HG19_PTA_8420_1",
+  "HG19_PTA_8420_2",
+  "ILLUMINA_6566_BLOOD",
+  "ILLUMINA_6566_SPERM"
+)
+
+platform_group <- function(token_vec){
+  groups <- character(0)
+
+  if (any(token_vec %in% c("ILLUMINA_6566_BLOOD","ILLUMINA_6566_SPERM","HG19_ILLUMINA_7669")))
+    groups <- c(groups, "ILLUMINA")
+  if (any(token_vec == "DUPLEX_PPMSEQ_6566"))
+    groups <- c(groups, "PPMSEQ")
+  if (any(token_vec == "DUPLEX_UDSEQ_6566"))
+    groups <- c(groups, "UDSEQ")
+  if (any(token_vec == "DUPLEX_NANOSEQ_6566"))
+    groups <- c(groups, "NANOSEQ")
+  if (any(str_detect(token_vec, "^HG19_PTA_")))
+    groups <- c(groups, "PTA")
+
+  groups <- unique(groups)
+  if (length(groups) == 0) return("None")
+  if (length(groups) == 1) return(paste0(groups, "-only"))
+  "Multi-platform"
+}
+
+analyze_callset_full_depth <- function(call_col){
+  df_call <- nogerm %>% dplyr::filter(.data[[call_col]] == 1)
+  total_calls <- nrow(df_call)
+
+  # FDR per token (denominator = all calls in this callset)
+  fdr_token <- df_call %>%
+    tidyr::separate_rows(existing_in_unrelated_which, sep = ",") %>%
+    dplyr::mutate(token = str_trim(existing_in_unrelated_which)) %>%
+    dplyr::filter(token %in% tokens) %>%
+    dplyr::count(token, name = "n_hit") %>%
+    dplyr::mutate(
+      callset = call_col,
+      total_calls = total_calls,
+      fdr = n_hit / total_calls
+    )
+
+  # Source decomposition among unrelated-hit variants
+  source_decomp <- df_call %>%
+    dplyr::filter(existing_in_unrelated_which != ".") %>%
+    tidyr::separate_rows(existing_in_unrelated_which, sep = ",") %>%
+    dplyr::mutate(token = str_trim(existing_in_unrelated_which)) %>%
+    dplyr::group_by(chr, pos, ref, alt) %>%
+    dplyr::summarise(tokens = list(token), .groups = "drop") %>%
+    dplyr::mutate(source = vapply(tokens, platform_group, character(1))) %>%
+    dplyr::count(source, name = "n") %>%
+    dplyr::mutate(
+      callset = call_col,
+      frac_within_unrelated = n / sum(n)
+    )
+
+  list(fdr_token = fdr_token, source_decomp = source_decomp)
+}
+
+full_depth_results <- lapply(call_cols_full_depth, analyze_callset_full_depth)
+names(full_depth_results) <- call_cols_full_depth
+
+# Convenience binders
+full_depth_fdr_token <- dplyr::bind_rows(lapply(full_depth_results, `[[`, "fdr_token"))
+full_depth_source_decomp <- dplyr::bind_rows(lapply(full_depth_results, `[[`, "source_decomp"))
+
+full_depth_fdr_token
+full_depth_source_decomp
+
+
+```
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(stringr)
+library(ggplot2)
+
+# ----------------------------
+# 0) Factor orders (keep your call order)
+# ----------------------------
+call_order <- call_cols_full_depth
+
+token_order <- c(
+  "ILLUMINA_6566_BLOOD",
+  "ILLUMINA_6566_SPERM",
+  "HG19_ILLUMINA_7669",
+  "DUPLEX_PPMSEQ_6566",
+  "DUPLEX_UDSEQ_6566",
+  "DUPLEX_NANOSEQ_6566",
+  "HG19_PTA_6566_1",
+  "HG19_PTA_6566_2",
+  "HG19_PTA_8420_1",
+  "HG19_PTA_8420_2"
+)
+
+
+# ----------------------------
+# 2) Stacked bars: platform-only vs multi-platform composition (within unrelated-hit variants)
+# ----------------------------
+source_order <- c("ILLUMINA-only", "PPMSEQ-only", "UDSEQ-only", "NANOSEQ-only", "PTA-only", "Multi-platform")
+
+source_plot_df <- full_depth_source_decomp %>%
+  dplyr::mutate(
+    callset = factor(callset, levels = call_order),
+    callset_label = stringr::str_replace(callset, "^call_", ""),
+    source = factor(source, levels = source_order)
+  ) %>%
+  dplyr::group_by(callset_label) %>%
+  dplyr::mutate(frac_within_unrelated = n / sum(n)) %>%
+  dplyr::ungroup()
+
+
+source_plot_df$callset_label <- factor(source_plot_df$callset_label, levels=levels(source_plot_df$callset) %>% str_replace_all(., "^call_", "") %>% rev(.))
+p_source <- ggplot(source_plot_df, aes(x = callset_label, y = frac_within_unrelated, fill = source)) +
+  geom_col(width = 0.75, color = "white", linewidth = 0.2) +
+  coord_flip() +
+  theme_classic(base_size = 12) +
+  theme(
+    axis.title = element_blank(),
+    legend.title = element_blank(),
+    panel.grid = element_blank()
+  ) +
+  labs(y = "Fraction (within unrelated-hit variants)")
+
+p_source
+
+
+# ----------------------------
+# 3) Optional: compact summary table to accompany plots (per callset totals)
+# ----------------------------
+summary_tbl <- full_depth_fdr_token %>%
+  dplyr::group_by(callset) %>%
+  dplyr::summarise(total_calls = dplyr::first(total_calls), .groups = "drop") %>%
+  dplyr::left_join(
+    full_depth_source_decomp %>%
+      dplyr::group_by(callset) %>%
+      dplyr::summarise(unrelated_hit_variants = sum(n), .groups = "drop"),
+    by = "callset"
+  ) %>%
+  dplyr::mutate(
+    callset = factor(callset, levels = call_order),
+    callset_label = stringr::str_replace(as.character(callset), "^call_", ""),
+    unrelated_hit_rate = unrelated_hit_variants / total_calls
+  ) %>%
+  dplyr::arrange(callset)
+
+summary_tbl
+
+```
+
+```{r}
+
+```
+
+
+### Call-to-call
+
+```{r}
+suppressPackageStartupMessages({
+  library(readr)
+  library(dplyr)
+  library(stringr)
+  library(UpSetR)
+})
+
+
+# ---- Build matrix for UpSetR (missing cols -> 0) ----
+make_mat_strata <- function(df, cols) {
+  out <- lapply(cols, function(x) {
+    if (x %in% colnames(df)) as.integer(df[[x]] %in% 1) else rep(0L, nrow(df))
+  })
+  mat <- as.data.frame(out, check.names = FALSE)
+  colnames(mat) <- cols
+  rownames(mat) <- NULL
+  mat
+}
+
+mat_calls <- make_mat_strata(filt, call_cols_full_depth)
+
+colnames(mat_calls) <- str_replace(colnames(mat_calls), "^call_", "")
+
+# ---- Plot ----
+upset(
+  mat_calls,
+  nsets = ncol(mat_calls),
+  nintersects = 200,
+  keep.order = TRUE,
+  order.by = "freq",
+  mainbar.y.label = "Intersection size",
+  sets.x.label = "Set size"
+)
+```
+
+
+### Call-to-BAM
+
+```{r}
+
+call_cols_full_depth <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  #"call_ppmSeq_putative_multiread",
+  "call_ppmSeq_singleton_HC",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+call_cols_200x <- c(
+  "call_Illumina_200x",
+  "call_ppmSeq_multiread_200x",
+  "call_ppmSeq_singleton_HC_200x",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+call_cols_100x <- c(
+  "call_Illumina_100x",
+  "call_ppmSeq_multiread_100x",
+  #"call_ppmSeq_putative_multiread_100x",
+  "call_ppmSeq_singleton_HC_100x",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+call_cols_30x <- c(
+  "call_Illumina_30x",
+  "call_ppmSeq_multiread_30x",
+  #"call_ppmSeq_putative_multiread_30x",
+  "call_ppmSeq_singleton_HC_30x",
+  "call_UDSeq_30x_multiread",
+  "call_UDSeq_30x_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+
+call_cols_ppmSeq <- c(
+  "call_ppmSeq_multiread",
+  #"call_ppmSeq_putative_multiread",
+  "call_ppmSeq_singleton_HC",
+  "call_ppmSeq_multiread_30x",
+  #"call_ppmSeq_putative_multiread_30x",
+  "call_ppmSeq_singleton_HC_30x",
+  "call_ppmSeq_multiread_100x",
+  #"call_ppmSeq_putative_multiread_100x",
+  "call_ppmSeq_singleton_HC_100x",
+  "call_ppmSeq_multiread_200x",
+  #"call_ppmSeq_putative_multiread_200x",
+  "call_ppmSeq_singleton_HC_200x"
+)
+
+call_cols_illumina <- c(
+  "call_Illumina",
+  "call_Illumina_30x",
+  "call_Illumina_100x",
+  "call_Illumina_200x"
+)
+
+
+call_cols_full_depth_clonal_with_PTA <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  "call_UDSeq_multiread",
+  "call_NanoSeq_multiread",
+  "call_HiDEFseq_double_stranded",
+  "call_PTA_singleton"
+)
+call_cols_full_depth_clonal <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  "call_UDSeq_multiread",
+  "call_NanoSeq_multiread",
+  "call_HiDEFseq_double_stranded"
+)
+
+call_cols_200x_clonal_with_PTA <- c(
+  "call_Illumina_200x",
+  "call_ppmSeq_multiread_200x",
+  "call_UDSeq_multiread",
+  "call_NanoSeq_multiread",
+  "call_HiDEFseq_double_stranded",
+  "call_PTA_singleton"
+)
+
+
+call_cols_200x_clonal <- c(
+  "call_Illumina_200x",
+  "call_ppmSeq_multiread_200x",
+  "call_UDSeq_multiread",
+  "call_NanoSeq_multiread",
+  "call_HiDEFseq_double_stranded"
+)
+
+
+call_cols_100x_clonal_with_PTA <- c(
+  "call_Illumina_100x",
+  "call_ppmSeq_multiread_100x",
+  "call_UDSeq_multiread",
+  "call_NanoSeq_multiread",
+  "call_HiDEFseq_double_stranded",
+  "call_PTA_singleton"
+)
+
+
+call_cols_100x_clonal <- c(
+  "call_Illumina_100x",
+  "call_ppmSeq_multiread_100x",
+  "call_UDSeq_multiread",
+  "call_NanoSeq_multiread",
+  "call_HiDEFseq_double_stranded"
+)
+
+call_cols_30x_clonal_with_PTA <- c(
+  "call_Illumina_30x",
+  "call_ppmSeq_multiread_30x",
+  "call_UDSeq_30x_multiread",
+  "call_NanoSeq_multiread",
+  "call_HiDEFseq_double_stranded",
+  "call_PTA_singleton"
+)
+
+call_cols_30x_clonal <- c(
+  "call_Illumina_30x",
+  "call_ppmSeq_multiread_30x",
+  "call_UDSeq_30x_multiread",
+  "call_NanoSeq_multiread",
+  "call_HiDEFseq_double_stranded"
+)
+
+
+exist_cols_full <- c(
+  "is_existing_lower_ci_0001_ILLUMINA",
+  "is_existing_lower_ci_0001_DUPLEX_PPMSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_UDSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_NANOSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ",
+  "existing_any_PTA1_16_singleton",
+  "existing_any_PTA1_16_multiple"
+)
+exist_cols_full_altge1 <- c(
+  "is_altge1_ILLUMINA",
+  "is_altge1_DUPLEX_PPMSEQ",
+  "is_altge1_DUPLEX_UDSEQ",
+  "is_altge1_DUPLEX_NANOSEQ",
+  "is_altge1_DUPLEX_HIDEFSEQ",
+  "existing_any_PTA1_16_singleton",
+  "existing_any_PTA1_16_multiple"
+)
+
+exist_cols_200x <- c(
+  "is_existing_lower_ci_0001_ILLUMINA_200x",
+  "is_existing_lower_ci_0001_DUPLEX_PPMSEQ_200X",
+  "is_existing_lower_ci_0001_DUPLEX_UDSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_NANOSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ",
+  "existing_any_PTA1_16_singleton",
+  "existing_any_PTA1_16_multiple"
+)
+
+exist_cols_100x <- c(
+  "is_existing_lower_ci_0001_ILLUMINA_100x",
+  "is_existing_lower_ci_0001_DUPLEX_PPMSEQ_100X",
+  "is_existing_lower_ci_0001_DUPLEX_UDSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_NANOSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ",
+  "existing_any_PTA1_16_singleton",
+  "existing_any_PTA1_16_multiple"
+)
+
+exist_cols_30x <- c(
+  "is_existing_lower_ci_0001_ILLUMINA_30x",
+  "is_existing_lower_ci_0001_DUPLEX_PPMSEQ_30X",
+  "is_existing_lower_ci_0001_DUPLEX_UDSEQ_30X",
+  "is_existing_lower_ci_0001_DUPLEX_NANOSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ",
+  "existing_any_PTA1_16_singleton",
+  "existing_any_PTA1_16_multiple"
+)
+
+get_self_exist_cols_full <- function(callset) {
+
+  if (callset == "call_Illumina")
+    return("is_existing_lower_ci_0001_ILLUMINA")
+
+  if (callset %in% c("call_ppmSeq_multiread","call_ppmSeq_singleton_HC"))
+    return("is_existing_lower_ci_0001_DUPLEX_PPMSEQ")
+
+  if (callset %in% c("call_UDSeq_multiread","call_UDSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_UDSEQ")
+
+  if (callset %in% c("call_NanoSeq_multiread","call_NanoSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_NANOSEQ")
+
+  if (callset %in% c("call_HiDEFseq_double_stranded","call_HiDEFseq_single_stranded"))
+    return("is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ")
+
+  if (callset == "call_PTA_singleton")
+    return(c("existing_any_PTA1_16_singleton","existing_any_PTA1_16_multiple"))
+
+  character(0)
+}
+
+
+get_self_exist_cols_full_altge1 <- function(callset) {
+
+  if (callset == "call_Illumina")
+    return("is_altge1_ILLUMINA")
+
+  if (callset %in% c("call_ppmSeq_multiread","call_ppmSeq_singleton_HC"))
+    return("is_altge1_DUPLEX_PPMSEQ")
+
+  if (callset %in% c("call_UDSeq_multiread","call_UDSeq_singleton"))
+    return("is_altge1_DUPLEX_UDSEQ")
+
+  if (callset %in% c("call_NanoSeq_multiread","call_NanoSeq_singleton"))
+    return("is_altge1_DUPLEX_NANOSEQ")
+
+  if (callset %in% c("call_HiDEFseq_double_stranded","call_HiDEFseq_single_stranded"))
+    return("is_altge1_DUPLEX_HIDEFSEQ")
+
+  if (callset == "call_PTA_singleton")
+    return(c("existing_any_PTA1_16_singleton","existing_any_PTA1_16_multiple"))
+
+  character(0)
+}
+
+get_self_exist_cols_30x <- function(callset) {
+
+  if (callset == "call_Illumina_30x")
+    return("is_existing_lower_ci_0001_ILLUMINA_30x")
+
+  if (callset %in% c("call_ppmSeq_multiread_30x","call_ppmSeq_singleton_HC_30x"))
+    return("is_existing_lower_ci_0001_DUPLEX_PPMSEQ_30X")
+
+  if (callset %in% c("call_UDSeq_30x_multiread","call_UDSeq_30x_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_UDSEQ_30X")
+
+  # NanoSeq / HiDEFseq: no downsample existence columns in your list
+  if (callset %in% c("call_NanoSeq_multiread","call_NanoSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_NANOSEQ")
+
+  if (callset %in% c("call_HiDEFseq_double_stranded","call_HiDEFseq_single_stranded"))
+    return("is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ")
+
+  if (callset %in% c("call_PTA_singleton","call_PTA_multiple"))
+    return(c("existing_any_PTA1_16_singleton","existing_any_PTA1_16_multiple"))
+
+  character(0)
+}
+
+get_self_exist_cols_100x <- function(callset) {
+
+  if (callset == "call_Illumina_100x")
+    return("is_existing_lower_ci_0001_ILLUMINA_100x")
+
+  if (callset %in% c("call_ppmSeq_multiread_100x","call_ppmSeq_singleton_HC_100x","call_ppmSeq_putative_multiread_100x"))
+    return("is_existing_lower_ci_0001_DUPLEX_PPMSEQ_100X")
+
+  # UDSeq/Nano/HiDEF: no downsample existence columns in your list
+  if (callset %in% c("call_UDSeq_multiread","call_UDSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_UDSEQ")
+
+  if (callset %in% c("call_NanoSeq_multiread","call_NanoSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_NANOSEQ")
+
+  if (callset %in% c("call_HiDEFseq_double_stranded","call_HiDEFseq_single_stranded"))
+    return("is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ")
+
+  if (callset %in% c("call_PTA_singleton","call_PTA_multiple"))
+    return(c("existing_any_PTA1_16_singleton","existing_any_PTA1_16_multiple"))
+
+  character(0)
+}
+get_self_exist_cols_200x <- function(callset) {
+
+  if (callset == "call_Illumina_200x")
+    return("is_existing_lower_ci_0001_ILLUMINA_200x")
+
+  if (callset %in% c("call_ppmSeq_multiread_200x","call_ppmSeq_singleton_HC_200x","call_ppmSeq_putative_multiread_200x"))
+    return("is_existing_lower_ci_0001_DUPLEX_PPMSEQ_200X")
+
+  # UDSeq/Nano/HiDEF: no downsample existence columns in your list
+  if (callset %in% c("call_UDSeq_multiread","call_UDSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_UDSEQ")
+
+  if (callset %in% c("call_NanoSeq_multiread","call_NanoSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_NANOSEQ")
+
+  if (callset %in% c("call_HiDEFseq_double_stranded","call_HiDEFseq_single_stranded"))
+    return("is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ")
+
+  if (callset %in% c("call_PTA_singleton","call_PTA_multiple"))
+    return(c("existing_any_PTA1_16_singleton","existing_any_PTA1_16_multiple"))
+
+  character(0)
+}
+
+```
+
+
+```{r}
+library(dplyr)
+library(stringr)
+library(ggplot2)
+
+call_cols <- call_cols_full_depth
+#call_cols <- call_cols_30x
+#call_cols <- call_cols_100x
+#call_cols <- call_cols_200x
+
+call_cols_clonal <- call_cols_full_depth_clonal
+#call_cols_clonal <- call_cols_30x_clonal
+#call_cols_clonal <- call_cols_100x_clonal
+#call_cols_clonal <- call_cols_200x_clonal
+
+#exist_cols <- exist_cols_full
+exist_cols <- exist_cols_full_altge1
+#exist_cols <- exist_cols_30x
+#exist_cols <- exist_cols_100x
+#exist_cols <- exist_cols_200x
+
+#get_self_exist_cols <- get_self_exist_cols_full 
+get_self_exist_cols <-get_self_exist_cols_full_altge1
+#get_self_exist_cols <- get_self_exist_cols_30x 
+#get_self_exist_cols <- get_self_exist_cols_100x 
+#get_self_exist_cols <- get_self_exist_cols_200x 
+
+call_levels <- str_replace(call_cols, "^call_", "")
+
+# main
+call_to_exist_prop <- lapply(call_cols, function(cc) {
+
+  #df_call <- filt %>% dplyr::filter(.data[[cc]] == 1)
+  df_call <- filt_altge1 %>% dplyr::filter(.data[[cc]] == 1)
+
+  if (nrow(df_call) == 0) return(NULL)
+
+  self_cols <- get_self_exist_cols(cc)
+  other_exist_cols <- setdiff(exist_cols, self_cols)
+
+  other_n <- rowSums(df_call[, other_exist_cols, drop=FALSE] == 1, na.rm = TRUE)
+
+  overlap_class <- case_when(
+    other_n == 0 ~ "private",
+    other_n == 1 ~ "overlap_1",
+    other_n >= 2 ~ "overlap_ge_2"
+  )
+
+  tibble(
+    callset = str_replace(cc, "^call_", ""),
+    overlap_class = overlap_class
+  )
+}) %>%
+  bind_rows() %>%
+  count(callset, overlap_class, name = "n") %>%
+  group_by(callset) %>%
+  mutate(prop = n / sum(n)) %>%
+  ungroup() %>%
+  mutate(
+    overlap_class = factor(overlap_class,
+                           levels = c("private","overlap_1","overlap_ge_2")),
+    callset = factor(callset,
+                     levels = str_replace(call_cols, "^call_", ""))
+  )
+
+
+
+call_to_exist_prop$callset <- factor(
+  call_to_exist_prop$callset,
+  levels = rev(call_levels)  # coord_flip 때문에 reverse
+)
+
+call_to_exist_prop <- call_to_exist_prop %>%
+  dplyr::mutate(
+    overlap_class = factor(
+      overlap_class,
+      levels = c("overlap_ge_2", "overlap_1", "private")  # ← reverse
+    )
+  )
+
+lab_df <- call_to_exist_prop %>%
+  dplyr::mutate(overlap_class = as.character(overlap_class)) %>%
+  dplyr::group_by(callset) %>%
+  dplyr::arrange(match(overlap_class, c("private", "overlap_1", "overlap_ge_2")), .by_group = TRUE) %>%
+  dplyr::mutate(
+    y_center = cumsum(prop) - prop / 2,
+    y_edge   = cumsum(prop),
+    y_line   = y_edge + 0.020,
+    y_label  = y_edge + 0.035,
+    label = ifelse(
+      prop >= 0.042,
+      scales::percent(prop, accuracy = 0.1),
+      scales::percent(prop, accuracy = 0.01)
+    )
+  ) %>%
+  dplyr::ungroup()
+
+ggplot(call_to_exist_prop,
+       aes(x = callset, y = prop, fill = overlap_class)) +
+  geom_col(width = 0.75) +
+
+  # inside (>=1%)
+  geom_text(
+    data = lab_df %>% dplyr::filter(prop >= 0.042),
+    aes(x = callset, y = y_center, label = label),
+    inherit.aes = FALSE,
+    size = 2.7
+  ) +
+
+  # line
+  geom_segment(
+    data = lab_df %>% dplyr::filter(prop < 0.042, prop > 0),
+    aes(x = callset, xend = callset, y = y_edge, yend = y_line),
+    inherit.aes = FALSE,
+    linewidth = 0.3
+  ) +
+
+  # outside label (<1%)
+  geom_text(
+    data = lab_df %>% dplyr::filter(prop < 0.042, prop > 0),
+    aes(x = callset, y = y_label, label = label),
+    inherit.aes = FALSE,
+    hjust = 0,
+    size = 2.5
+  ) +
+
+  coord_flip(clip = "off") +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    expand = expansion(mult = c(0, 0.10))
+  ) +
+  theme_classic() +
+  labs(x = NULL, y = "Proportion (%)", fill = NULL)
+```
+
+
+
+```{r}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+
+
+
+
+#call_cols <- call_cols_full_depth
+#exist_cols <- exist_cols_full
+#get_self_exist_cols <- get_self_exist_cols_full
+
+
+
+# -----------------------------
+# Name prettifier
+# -----------------------------
+pretty_callset <- function(x) {
+  #x <- str_remove(x, "^call_")
+  depth <- str_match(x, "_(\\d+[Xx])$")[,2]
+  depth <- ifelse(is.na(depth), "", paste0("_", tolower(depth)))
+  x0 <- str_remove(x, "_(\\d+[Xx])$")
+
+  case_when(
+#    x0 == "call_Illumina" ~ paste0("Illumina", depth),
+#    x0 == "call_ppmSeq_multiread" ~ paste0("ppmSeq_multi", depth),
+#    x0 == "call_ppmSeq_singleton_HC" ~ paste0("ppmSeq_single", depth),
+#    x0 == "call_UDSeq_multiread" ~ "UDSeq_multi",
+#    x0 == "call_UDSeq_singleton" ~ "UDSeq_single",
+#    x0 == "call_UDSeq_30x_multiread" ~ paste0("UDSeq_multi", depth),
+#    x0 == "call_UDSeq_30x_singleton" ~ paste0("UDSeq_single", depth),
+#    x0 == "call_NanoSeq_multiread" ~ "NanoSeq_multi",
+#    x0 == "call_NanoSeq_singleton" ~ "NanoSeq_single",
+#    x0 == "call_HiDEFseq_double_stranded" ~ "HiDEFseq_ds",
+#    x0 == "call_HiDEFseq_single_stranded" ~ "HiDEFseq_ss",
+#    x0 == "call_PTA_singleton" ~ "PTA_single",
+    TRUE ~ x
+  )
+}
+
+pretty_exist <- function(x) {
+  depth <- str_match(x, "_(\\d+[Xx])$")[,2]
+  depth <- ifelse(is.na(depth), "", paste0("_", tolower(depth)))
+  x0 <- str_remove(x, "_(\\d+[Xx])$")
+
+  case_when(
+    str_detect(x0, "ILLUMINA") ~ paste0("Illumina", depth),
+    str_detect(x0, "DUPLEX_PPMSEQ") ~ paste0("ppmSeq", depth),
+    str_detect(x0, "DUPLEX_UDSEQ") ~ paste0("UDSeq", depth),
+    str_detect(x0, "DUPLEX_NANOSEQ") ~ paste0("NanoSeq", depth),
+    str_detect(x0, "DUPLEX_HIDEFSEQ") ~ paste0("HiDEFseq", depth),
+    str_detect(x0, "PTA") & str_detect(x0, "singleton") ~ "PTA_single",
+    str_detect(x0, "PTA") & str_detect(x0, "multiple") ~ "PTA_multiple",
+    TRUE ~ x
+  )
+}
+
+# -----------------------------
+# Core: for each callset, make "Total + overlaps with each other BAM evidence"
+# Overlaps are NOT mutually exclusive (separate bars).
+# -----------------------------
+make_callset_overlap_long <- function(filt, call_cols, exist_cols, get_self_exist_cols,
+                                      mode = c("prop","count")) {
+  mode <- match.arg(mode)
+
+  bind_rows(lapply(call_cols, function(cc) {
+
+    df_call <- filt %>% dplyr::filter(.data[[cc]] == 1)
+    total <- nrow(df_call)
+    if (total == 0) return(NULL)
+
+    self_cols <- get_self_exist_cols(cc)
+    other_exist_cols <- setdiff(exist_cols, self_cols)
+
+    other_n <- vapply(other_exist_cols, function(ec) {
+      sum(df_call[[ec]] == 1, na.rm = TRUE)
+    }, numeric(1))
+
+    tibble(
+      callset = cc,
+      overlap_with = c("Total", other_exist_cols),
+      n = c(total, other_n)
+    ) %>%
+      mutate(
+        prop = n / total,
+        value = if (mode == "prop") prop else n,
+        callset_pretty = pretty_callset(callset),
+        overlap_with_pretty = if_else(overlap_with == "Total",
+                                      "Total (calls)",
+                                      pretty_exist(overlap_with))
+      )
+  }))
+}
+
+
+make_callset_overlap_long <- function(filt, call_cols, exist_cols, get_self_exist_cols,
+                                      mode = c("prop","count")) {
+  mode <- match.arg(mode)
+
+  bind_rows(lapply(call_cols, function(cc) {
+
+    df_call <- filt %>% dplyr::filter(.data[[cc]] == 1)
+    total <- nrow(df_call)
+    if (total == 0) return(NULL)
+
+    self_cols <- get_self_exist_cols(cc)
+    other_exist_cols <- setdiff(exist_cols, self_cols)
+
+    # Overlap with each other BAM (NOT mutually exclusive)
+    other_n <- vapply(other_exist_cols, function(ec) {
+      sum(df_call[[ec]] == 1, na.rm = TRUE)
+    }, numeric(1))
+
+    # Private: no other BAM evidence (excluding self)
+    if (length(other_exist_cols) == 0) {
+      private_n <- total
+    } else {
+      other_mat <- as.matrix(df_call[, other_exist_cols, drop = FALSE] == 1)
+      other_mat[is.na(other_mat)] <- FALSE
+      private_n <- sum(rowSums(other_mat) == 0)
+    }
+
+    tibble(
+      callset = cc,
+      overlap_with = c("Total", "Private", other_exist_cols),
+      n = c(total, private_n, other_n)
+    ) %>%
+      mutate(
+        prop = n / total,
+        value = if (mode == "prop") prop else n,
+        callset_pretty = pretty_callset(callset),
+        overlap_with_pretty = case_when(
+          overlap_with == "Total" ~ "Total (calls)",
+          overlap_with == "Private" ~ "Private",
+          TRUE ~ pretty_exist(overlap_with)
+        )
+      )
+  }))
+}
+
+# -----------------------------
+# Plot without tidytext::reorder_within
+# - Order within each facet: Total first, then overlaps by value desc
+# -----------------------------
+
+# =========================================================
+# 1) full depth: relative proportion (call + BAM both full depth)
+
+
+long_full_rel <- make_callset_overlap_long(
+  #filt = filt,
+  filt = filt_altge1,
+  call_cols = call_cols,
+  exist_cols = exist_cols,
+  get_self_exist_cols = get_self_exist_cols,
+  mode = "prop"
+)
+
+tbl_full_rel <- long_full_rel %>%
+  dplyr::select(callset_pretty, overlap_with_pretty, n, prop) %>%
+  group_by(callset_pretty) %>%
+  arrange(desc(prop), .by_group = TRUE) %>%
+  ungroup()
+tbl_full_rel
+
+plot_callset_overlap <- function(long_df, mode = c("prop","count")) {
+  mode <- match.arg(mode)
+
+  dfp <- long_df %>%
+    group_by(callset_pretty) %>%
+    mutate(
+      ord = if_else(overlap_with == "Total", Inf, value),
+      overlap_with_pretty2 = paste0(overlap_with_pretty, "___", callset_pretty),
+      label = if (mode == "prop") scales::percent(value, accuracy = 0.1) else as.character(n)
+    ) %>%
+    ungroup()
+
+  # Global factor levels across all facets, respecting per-facet ordering (your original)
+  lvl <- dfp %>%
+    group_by(callset_pretty) %>%
+    arrange(desc(ord), .by_group = TRUE) %>%
+    summarize(levels = list(unique(overlap_with_pretty2)), .groups = "drop") %>%
+    pull(levels) %>%
+    unlist(use.names = FALSE)
+
+  dfp$overlap_with_pretty2 <- factor(dfp$overlap_with_pretty2, levels = lvl)
+
+  ggplot(dfp, aes(x = overlap_with_pretty2, y = value, fill = overlap_with_pretty)) +
+    geom_col(width = 0.75) +
+    geom_text(
+      aes(label = label),
+      hjust = -0.05,              # put label slightly to the right of bar end
+      size = 3,
+      show.legend = FALSE
+    ) +
+    coord_flip() +
+    facet_wrap(~ callset_pretty, scales = "free_y", nrow = 2, ncol = 5) +
+    scale_x_discrete(labels = function(x) sub("___.*$", "", x)) +
+    scale_y_continuous(
+      labels = if (mode == "prop") percent_format(accuracy = 1) else waiver(),
+      expand = expansion(mult = c(0, 0.18))  # add headroom for labels (prevents axis collision)
+    ) +
+    theme_classic(base_size = 13) +
+    theme(legend.position = "none") +
+    labs(x = NULL, y = ifelse(mode == "prop", "Proportion within callset", "Count"))
+}
+# use as-is
+long_full_rel$callset_pretty <- long_full_rel$callset_pretty %>% factor(., levels=unique(.))
+plot_callset_overlap(long_full_rel, mode = "prop")
+
+
+```
+
+
+
+
+```{r}
+#call_cols_clonal <- call_cols_full_depth_clonal
+#exist_cols <- exist_cols_full
+#get_self_exist_cols <- get_self_exist_cols_full 
+
+call_levels <- str_replace(call_cols_clonal, "^call_", "")
+
+call_to_exist_abs <- lapply(call_cols_clonal, function(cc) {
+
+  df_call <- filt %>% dplyr::filter(.data[[cc]] == 1)
+  if (nrow(df_call) == 0) return(NULL)
+
+  self_cols <- get_self_exist_cols(cc)
+  other_exist_cols <- setdiff(exist_cols, self_cols)
+
+  other_n <- rowSums(df_call[, other_exist_cols, drop=FALSE] == 1, na.rm = TRUE)
+
+  overlap_class <- case_when(
+    other_n == 0 ~ "private",
+    other_n == 1 ~ "overlap_1",
+    other_n >= 2 ~ "overlap_ge_2"
+  )
+
+  tibble(
+    callset = str_replace(cc, "^call_", ""),
+    overlap_class = overlap_class
+  )
+}) %>%
+  bind_rows() %>%
+  count(callset, overlap_class, name = "n") %>%
+  mutate(
+    overlap_class = factor(overlap_class,
+                           levels = c("private","overlap_1","overlap_ge_2")),
+    callset = factor(callset,
+                     levels = rev(call_levels))
+  )
+
+# absolute stacked
+ggplot(call_to_exist_abs,
+       aes(x = callset, y = n, fill = overlap_class)) +
+  geom_col(width = 0.75) +
+  coord_flip() +
+  theme_classic() +
+  labs(x = NULL, y = "Count", fill = NULL)
+
+
+call_to_bam_overlap_tbl <- call_to_exist_abs %>%  mutate(
+    callset = factor(callset, levels = rev(levels(callset)))
+  ) %>%  arrange(callset, overlap_class) %>%
+    group_by(callset) %>%
+    mutate(prop = n / sum(n)) %>%
+    ungroup()
+
+call_to_bam_overlap_tbl
+```
+
+
+
+
+
+
+### Variant universe
+
+```{r}
+
+exist_cols <- exist_cols_full
+#exist_cols <- exist_cols_30x
+#exist_cols <- exist_cols_100x
+#exist_cols <- exist_cols_200x
+
+
+support_cols <- setdiff(exist_cols,
+          c("existing_any_PTA1_16_singleton",
+            "existing_any_PTA1_16_multiple"))
+
+
+#filt2 <- filt %>%
+filt2 <- filt %>%
+  mutate(
+    n_support = rowSums(
+      dplyr::select(., dplyr::all_of(support_cols)) == 1,
+      na.rm = TRUE
+    )
+  ) %>%
+  dplyr::filter(n_support >= 1, n_support <= 5) %>%
+  mutate(n_support = factor(n_support, levels = 1:5)) #%>%
+  #filter(n_support<5)
+
+med_tbl <- filt2 %>%
+  group_by(n_support) %>%
+  summarize(med = median(ILLUMINA_MAF, na.rm = TRUE), .groups = "drop")
+
+ggplot(filt2, aes(x = n_support, y = ILLUMINA_MAF, fill = n_support)) +
+  geom_violin(trim = TRUE, scale = "width", alpha = 0.5, color = NA) +
+  geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.95) +
+  coord_flip() +
+  theme_classic(base_size = 14) +
+  theme(legend.position = "none") +
+  labs(
+    x = "# Platforms supporting variant",
+    y = "Illumina MAF"
+  ) +
+   scale_y_continuous(
+    limits = c(0, 0.3),
+    breaks = seq(0, 0.3, by = 0.05),
+    expand = expansion(mult = c(0.02, 0.18))
+  )
+
+stat_tbl <- filt2 %>%
+  group_by(n_support) %>%
+  summarize(
+    mean_maf   = mean(ILLUMINA_MAF, na.rm = TRUE),
+    median_maf = median(ILLUMINA_MAF, na.rm = TRUE),
+    .groups = "drop"
+  )
+stat_tbl
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+exist_cols <- exist_cols_full_altge1
+support_cols <- c(
+  setdiff(exist_cols,
+          c("existing_any_PTA1_16_singleton",
+            "existing_any_PTA1_16_multiple"))
+)
+
+filt2 <- filt %>%
+  mutate(
+    n_support = rowSums(
+      dplyr::select(., dplyr::all_of(support_cols)) == 1,
+      na.rm = TRUE
+    ),
+    PTA_class = case_when(
+      existing_any_PTA1_16_number == 0 ~ "no_PTA_BAM_support",
+      existing_any_PTA1_16_number == 1 ~ "PTA_BAM_support_1",
+      existing_any_PTA1_16_number >= 2 ~ "PTA_BAM_support_ge_2",
+      TRUE ~ NA_character_
+    )
+  ) %>%
+  filter(!is.na(PTA_class)) %>%
+  filter(n_support >= 1, n_support <= 5) %>%
+  mutate(
+    n_support = factor(n_support, levels = 1:5),
+    PTA_class = factor(PTA_class,
+                       levels = c("no_PTA_BAM_support",
+                                  "PTA_BAM_support_1",
+                                  "PTA_BAM_support_ge_2"))
+  )
+
+plot_df <- filt2 %>%
+  count(n_support, PTA_class, name = "n") %>%
+  group_by(n_support) %>%
+  mutate(frac = n / sum(n)) %>%
+  ungroup()
+
+ggplot(plot_df, aes(x = n_support, y = frac, fill = PTA_class)) +
+  geom_col(width = 0.85) +
+  coord_flip() +
+  
+  geom_text(
+    aes(label = percent(frac, accuracy = 1)),
+    position = position_stack(vjust = 0.5),  # center of each stack
+    size = 4
+  ) +
+  
+  theme_classic(base_size = 14) +
+  scale_y_continuous(labels = percent_format(accuracy = 1)) +
+  labs(x = "N_platform", y = "Fraction", fill = "PTA")
+
+```
+
+
+```{r}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+exist_cols_30x_altge1 <- c("is_altge1_ILLUMINA_30x", "is_altge1_DUPLEX_PPMSEQ_30X", "is_altge1_DUPLEX_UDSEQ_30X", "is_altge1_DUPLEX_NANOSEQ", "is_altge1_DUPLEX_HIDEFSEQ", "existing_any_PTA1_16_singleton", "existing_any_PTA1_16_multiple")
+
+#exist_cols <- exist_cols_full_altge1
+exist_cols <- exist_cols_30x_altge1
+
+#exist_cols <- exist_cols_30x
+#exist_cols <- exist_cols_100x
+#exist_cols <- exist_cols_200x
+
+support_cols <- c(
+  setdiff(exist_cols,
+          c("existing_any_PTA1_16_singleton",
+            "existing_any_PTA1_16_multiple"))
+)
+
+#support_cols <- filt %>% colnames(.) %>% .[str_detect(., "^is_existing")] %>% .[str_detect(., "ILLUMINA")]
+# ---- settings ----
+# map evidence col -> MAF col (adjust here if your column names differ)
+# 1) evidence col -> raw platform token (remove prefix only)
+#platform_raw <- stringr::str_remove(support_cols, "^is_existing_lower_ci_0001_")
+platform_raw <- stringr::str_remove(support_cols, "^is_altge1_")
+
+# 2) evidence col -> MAF col (rule: <platform_raw>_MAF)
+# e.g. is_existing_lower_ci_0001_DUPLEX_PPMSEQ -> DUPLEX_PPMSEQ_MAF
+evidence_to_maf <- stats::setNames(
+  paste0(platform_raw, "_MAF"),
+  support_cols
+)
+
+# 3) pretty platform label for facets (remove prefix + optional DUPLEX_)
+pretty_plat <- function(x) {
+  #stringr::str_remove(x, "^is_existing_lower_ci_0001_") %>%
+  stringr::str_remove(x, "^is_altge1_") %>%
+    stringr::str_remove("^DUPLEX_")
+}
+
+plats <- pretty_plat(support_cols)
+
+# ---- build long MAF table (only variants with evidence in that platform) ----
+maf_long <- bind_rows(lapply(support_cols, function(ec) {
+  maf_col <- evidence_to_maf[[ec]]
+  stopifnot(!is.null(maf_col))
+  if (!maf_col %in% colnames(filt)) stop(paste("Missing MAF column:", maf_col))
+
+  filt %>%
+    transmute(
+      platform = pretty_plat(ec),
+      maf = .data[[maf_col]],
+      has_evidence = .data[[ec]] == 1
+    ) %>%
+    filter(has_evidence, !is.na(maf))
+}), .id = NULL) %>%
+  select(-has_evidence)
+
+# ---- make vid once ----
+if (all(c("chr","pos","ref","alt") %in% colnames(filt))) {
+  filt <- filt %>% mutate(vid = paste(chr, pos, ref, alt, sep=":"))
+} else {
+  filt <- filt %>% mutate(vid = row_number())
+}
+
+# ---- build long MAF table (only variants with evidence) ----
+maf_long <- bind_rows(lapply(support_cols, function(ec) {
+  maf_col <- evidence_to_maf[[ec]]
+  if (!maf_col %in% colnames(filt)) stop(paste("Missing MAF column:", maf_col))
+
+  filt %>%
+    transmute(
+      vid = vid,
+      platform = pretty_plat(ec),
+      maf = .data[[maf_col]],
+      has_evidence = .data[[ec]] == 1
+    ) %>%
+    filter(has_evidence, !is.na(maf))
+})) %>%
+  dplyr::select(-has_evidence)
+
+# ---- wide for pairwise (shared variants only; both platforms have evidence) ----
+maf_wide <- maf_long %>%
+  mutate(platform = factor(platform, levels = plats)) %>%
+  tidyr::pivot_wider(names_from = platform, values_from = maf)
+
+# ---- build all ordered pairs (x,y), drop self ----
+pairs <- expand.grid(
+  x = plats,
+  y = plats,
+  stringsAsFactors = FALSE
+) %>%
+  filter(x != y) %>%
+  as_tibble()
+
+# ---- collect pairwise points + stats ----
+pair_df <- bind_rows(lapply(seq_len(nrow(pairs)), function(i) {
+  x <- pairs$x[i]
+  y <- pairs$y[i]
+
+  d <- maf_wide %>%
+    select(vid, all_of(c(x, y))) %>%
+    rename(x_maf = !!x, y_maf = !!y) %>%
+    filter(!is.na(x_maf), !is.na(y_maf))
+
+  n <- nrow(d)
+  if (n >= 3) {
+    ct <- suppressWarnings(cor.test(d$x_maf, d$y_maf, method = "pearson"))
+    r <- unname(ct$estimate)
+    p <- ct$p.value
+  } else {
+    r <- NA_real_
+    p <- NA_real_
+  }
+
+  d %>%
+    mutate(
+      x_plat = x,
+      y_plat = y,
+      n = n,
+      r = r,
+      p = p
+    )
+}))
+
+# text labels per facet (one row each)
+lab_df <- pair_df %>%
+  distinct(x_plat, y_plat, n, r, p) %>%
+  mutate(
+    label = paste0(
+      "n=", n,
+      "\nr=", ifelse(is.na(r), "NA", sprintf("%.3f", r)),
+      "\np=", ifelse(is.na(p), "NA", format(p, digits = 2, scientific = TRUE))
+    ),
+    x_pos = 0.29,
+    y_pos = 0.29
+  )
+
+pair_df <- pair_df %>%
+  mutate(
+    x_plat = factor(x_plat, levels = plats),
+    y_plat = factor(y_plat, levels = plats)
+  )
+
+lab_df <- lab_df %>%
+  mutate(
+    x_plat = factor(x_plat, levels = plats),
+    y_plat = factor(y_plat, levels = plats)
+  )
+
+
+#pdf("ilmn_maf_maf.pdf")
+ggplot(pair_df, aes(x = x_maf, y = y_maf)) +
+  geom_point(size = 0.6, alpha = 0.75) +
+  geom_abline(slope = 1, intercept = 0, linetype = 2) +
+  geom_text(
+    data = lab_df,
+    aes(x = x_pos, y = y_pos, label = label),
+    inherit.aes = FALSE,
+    hjust = 1, vjust = 1,
+    size = 3
+  ) +
+  facet_grid(y_plat ~ x_plat, drop = FALSE) +
+  scale_x_continuous(limits = c(0, 0.3), breaks = seq(0, 0.3, by = 0.1)) +
+  scale_y_continuous(limits = c(0, 0.3), breaks = seq(0, 0.3, by = 0.1)) +
+  coord_fixed() +
+  theme_classic(base_size = 12) +
+  theme(
+    strip.background = element_blank(),
+    panel.spacing = unit(0.8, "lines")
+  ) +
+  labs(x = "MAF (x platform)", y = "MAF (y platform)")
+#dev.off()
+```
+
+
+```{r}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+
+df_to_use_maf_maf <- rdselect_call1000
+
+exist_cols <- exist_cols_full
+#exist_cols <- exist_cols_30x
+#exist_cols <- exist_cols_100x
+#exist_cols <- exist_cols_200x
+
+support_cols <- c(
+  setdiff(exist_cols,
+          c("existing_any_PTA1_16_singleton",
+            "existing_any_PTA1_16_multiple"))
+)
+
+#support_cols <- filt %>% colnames(.) %>% .[str_detect(., "^is_existing")] %>% .[str_detect(., "ILLUMINA")]
+# ---- settings ----
+# map evidence col -> MAF col (adjust here if your column names differ)
+# 1) evidence col -> raw platform token (remove prefix only)
+platform_raw <- stringr::str_remove(support_cols, "^is_existing_lower_ci_0001_")
+
+# 2) evidence col -> MAF col (rule: <platform_raw>_MAF)
+# e.g. is_existing_lower_ci_0001_DUPLEX_PPMSEQ -> DUPLEX_PPMSEQ_MAF
+evidence_to_maf <- stats::setNames(
+  paste0(platform_raw, "_MAF"),
+  support_cols
+)
+
+# 3) pretty platform label for facets (remove prefix + optional DUPLEX_)
+pretty_plat <- function(x) {
+  stringr::str_remove(x, "^is_existing_lower_ci_0001_") %>%
+    stringr::str_remove("^DUPLEX_")
+}
+
+plats <- pretty_plat(support_cols)
+
+# ---- build long MAF table (only variants with evidence in that platform) ----
+maf_long <- bind_rows(lapply(support_cols, function(ec) {
+  maf_col <- evidence_to_maf[[ec]]
+  stopifnot(!is.null(maf_col))
+  if (!maf_col %in% colnames(filt)) stop(paste("Missing MAF column:", maf_col))
+
+  filt %>%
+    transmute(
+      platform = pretty_plat(ec),
+      maf = .data[[maf_col]],
+      has_evidence = .data[[ec]] == 1
+    ) %>%
+    filter(has_evidence, !is.na(maf))
+}), .id = NULL) %>%
+  select(-has_evidence)
+
+# ---- make vid once ----
+if (all(c("chr","pos","ref","alt") %in% colnames(filt))) {
+  filt <- filt %>% mutate(vid = paste(chr, pos, ref, alt, sep=":"))
+} else {
+  filt <- filt %>% mutate(vid = row_number())
+}
+
+# ---- build long MAF table (only variants with evidence) ----
+maf_long <- bind_rows(lapply(support_cols, function(ec) {
+  maf_col <- evidence_to_maf[[ec]]
+  if (!maf_col %in% colnames(filt)) stop(paste("Missing MAF column:", maf_col))
+
+  filt %>%
+    transmute(
+      vid = vid,
+      platform = pretty_plat(ec),
+      maf = .data[[maf_col]],
+      has_evidence = .data[[ec]] == 1
+    ) %>%
+    filter(has_evidence, !is.na(maf))
+})) %>%
+  dplyr::select(-has_evidence)
+
+# ---- wide for pairwise (shared variants only; both platforms have evidence) ----
+maf_wide <- maf_long %>%
+  mutate(platform = factor(platform, levels = plats)) %>%
+  tidyr::pivot_wider(names_from = platform, values_from = maf)
+
+# ---- build all ordered pairs (x,y), drop self ----
+pairs <- expand.grid(
+  x = plats,
+  y = plats,
+  stringsAsFactors = FALSE
+) %>%
+  filter(x != y) %>%
+  as_tibble()
+
+# ---- collect pairwise points + stats ----
+pair_df <- bind_rows(lapply(seq_len(nrow(pairs)), function(i) {
+  x <- pairs$x[i]
+  y <- pairs$y[i]
+
+  d <- maf_wide %>%
+    select(vid, all_of(c(x, y))) %>%
+    rename(x_maf = !!x, y_maf = !!y) %>%
+    filter(!is.na(x_maf), !is.na(y_maf))
+
+  n <- nrow(d)
+  if (n >= 3) {
+    ct <- suppressWarnings(cor.test(d$x_maf, d$y_maf, method = "pearson"))
+    r <- unname(ct$estimate)
+    p <- ct$p.value
+  } else {
+    r <- NA_real_
+    p <- NA_real_
+  }
+
+  d %>%
+    mutate(
+      x_plat = x,
+      y_plat = y,
+      n = n,
+      r = r,
+      p = p
+    )
+}))
+
+# text labels per facet (one row each)
+lab_df <- pair_df %>%
+  distinct(x_plat, y_plat, n, r, p) %>%
+  mutate(
+    label = paste0(
+      "n=", n,
+      "\nr=", ifelse(is.na(r), "NA", sprintf("%.3f", r)),
+      "\np=", ifelse(is.na(p), "NA", format(p, digits = 2, scientific = TRUE))
+    ),
+    x_pos = 0.29,
+    y_pos = 0.29
+  )
+
+pair_df <- pair_df %>%
+  mutate(
+    x_plat = factor(x_plat, levels = plats),
+    y_plat = factor(y_plat, levels = plats)
+  )
+
+lab_df <- lab_df %>%
+  mutate(
+    x_plat = factor(x_plat, levels = plats),
+    y_plat = factor(y_plat, levels = plats)
+  )
+
+
+ggplot(pair_df, aes(x = x_maf, y = y_maf)) +
+  geom_point(size = 0.6, alpha = 0.75) +
+  geom_abline(slope = 1, intercept = 0, linetype = 2) +
+  geom_text(
+    data = lab_df,
+    aes(x = x_pos, y = y_pos, label = label),
+    inherit.aes = FALSE,
+    hjust = 1, vjust = 1,
+    size = 3
+  ) +
+  facet_grid(y_plat ~ x_plat, drop = FALSE) +
+  scale_x_continuous(limits = c(0, 0.3), breaks = seq(0, 0.3, by = 0.1)) +
+  scale_y_continuous(limits = c(0, 0.3), breaks = seq(0, 0.3, by = 0.1)) +
+  coord_fixed() +
+  theme_classic(base_size = 12) +
+  theme(
+    strip.background = element_blank(),
+    panel.spacing = unit(0.8, "lines")
+  ) +
+  labs(x = "MAF (x platform)", y = "MAF (y platform)")
+#dev.off()
+```
+
+
+```{r}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+
+#exist_cols <- exist_cols_full
+#exist_cols <- exist_cols_30x
+#exist_cols <- exist_cols_100x
+#exist_cols <- exist_cols_200x
+
+#support_cols <- c(
+#  setdiff(exist_cols,
+#          c("existing_any_PTA1_16_singleton",
+#            "existing_any_PTA1_16_multiple"))
+#)
+
+pretty_plat <- function(x) {
+  x %>%
+#    str_remove("^is_existing_lower_ci_0001_") %>%
+    str_remove("^is_altge1_") %>%
+
+    str_remove("^DUPLEX_")
+}
+
+plats <- pretty_plat(support_cols)
+plats <- plats %>% factor(., levels=(.))
+#plats <- factor(plats, levels = c("ILLUMINA","PPMSEQ","UDSEQ","NANOSEQ","HIDEFSEQ")) %>% as.character()
+
+# binary matrix: rows=variants, cols=platforms
+mat_bam <- as.data.frame(lapply(support_cols, function(x) as.integer(filt[[x]] %in% 1)),
+                         check.names = FALSE)
+colnames(mat_bam) <- pretty_plat(support_cols)
+mat_bam <- mat_bam[rowSums(mat_bam) >= 2, , drop = FALSE]
+# enforce order if present
+keep <- intersect(levels(plats), colnames(mat_bam))
+mat_bam <- mat_bam[, keep, drop = FALSE]
+
+# Jaccard function
+jaccard <- function(a, b) {
+  a <- as.integer(a != 0)
+  b <- as.integer(b != 0)
+  inter <- sum(a & b)
+  uni <- sum(a | b)
+  if (uni == 0) NA_real_ else inter / uni
+}
+
+# compute full matrix (exclude self-self)
+J <- matrix(NA_real_, ncol(mat_bam), ncol(mat_bam),
+            dimnames = list(colnames(mat_bam), colnames(mat_bam)))
+
+for (i in seq_len(ncol(mat_bam))) {
+  for (j in seq_len(ncol(mat_bam))) {
+    if (i == j) {
+      J[i, j] <- NA_real_
+    } else {
+      J[i, j] <- jaccard(mat_bam[[i]], mat_bam[[j]])
+    }
+  }
+}
+# long for ggplot
+J_long <- as.data.frame(J) %>%
+  tibble::rownames_to_column("y") %>%
+  pivot_longer(-y, names_to = "x", values_to = "jaccard") %>%
+  mutate(
+    x = factor(x, levels = colnames(J)),
+    y = factor(y, levels = rev(colnames(J)))
+  )
+J_long <- J_long %>% dplyr::filter(x != y)
+
+ggplot(J_long, aes(x = x, y = y, fill = jaccard)) +
+  geom_tile(color = "grey85", linewidth = 0.4) +
+  geom_text(aes(label = sprintf("%.2f", jaccard)), size = 3, color = "black") +
+  coord_fixed() +
+  theme_classic(base_size = 14) +
+  theme(
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  ) +
+  scale_fill_gradient(low = "white", high = "steelblue", limits = c(0, 1)) +
+  labs(fill = "Jaccard")
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(tidyr)
+
+# ---- inputs ----
+call_cols_ppmSeq_multiread <- c(
+  "call_ppmSeq_multiread",
+  "call_ppmSeq_multiread_30x",
+  "call_ppmSeq_multiread_100x",
+  "call_ppmSeq_multiread_200x"
+)
+
+call_cols_ppmSeq_singleton <- c(
+  "call_ppmSeq_singleton_HC",
+  "call_ppmSeq_singleton_HC_30x",
+  "call_ppmSeq_singleton_HC_100x",
+  "call_ppmSeq_singleton_HC_200x"
+)
+
+# truth axes: exclude PPM evidence + exclude PTA
+#truth_cols <- c(
+#  "is_existing_lower_ci_0001_ILLUMINA",
+#  "is_existing_lower_ci_0001_DUPLEX_UDSEQ",
+#  "is_existing_lower_ci_0001_DUPLEX_NANOSEQ",
+#  "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ"
+#)
+
+truth_cols <- c(
+  "is_existing_lower_ci_0001_ILLUMINA",
+  "is_existing_lower_ci_0001_DUPLEX_UDSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_NANOSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ"
+)
+
+
+# ---- helper: parse depth label ----
+depth_label <- function(call_col) {
+  if (str_detect(call_col, "_30x$"))  return("30x")
+  if (str_detect(call_col, "_100x$")) return("100x")
+  if (str_detect(call_col, "_200x$")) return("200x")
+  "Full"
+}
+
+type_label <- function(call_col) {
+  if (str_detect(call_col, "multiread")) "multiread" else "singleton"
+}
+
+# ---- compute truth once ----
+df0 <- filt %>%
+  mutate(
+    truth = rowSums(dplyr::across(dplyr::all_of(truth_cols), ~ .x == 1), na.rm = TRUE) >= 1
+  )
+
+# ---- compute confusion + metrics for a set of call cols ----
+score_calls <- function(call_cols) {
+  bind_rows(lapply(call_cols, function(cc) {
+    pred <- df0[[cc]] == 1
+
+    TP <- sum(pred &  df0$truth, na.rm = TRUE)
+    FP <- sum(pred & !df0$truth, na.rm = TRUE)
+    FN <- sum(!pred &  df0$truth, na.rm = TRUE)
+    TN <- sum(!pred & !df0$truth, na.rm = TRUE)
+
+    precision <- if ((TP + FP) == 0) NA_real_ else TP / (TP + FP)
+    recall    <- if ((TP + FN) == 0) NA_real_ else TP / (TP + FN)
+    f1        <- if (is.na(precision) || is.na(recall) || (precision + recall) == 0) NA_real_
+                 else 2 * precision * recall / (precision + recall)
+
+    tibble(
+      call_col = cc,
+      depth = depth_label(cc),
+      ppm_type = type_label(cc),
+      TP = TP, FP = FP, FN = FN, TN = TN,
+      precision = precision,
+      recall = recall,
+      F1 = f1
+    )
+  }))
+}
+
+res <- bind_rows(
+  score_calls(call_cols_ppmSeq_multiread),
+  score_calls(call_cols_ppmSeq_singleton)
+) %>%
+  mutate(depth = factor(depth, levels = c("30x","100x","200x","Full"))) %>%
+  arrange(ppm_type, depth)
+
+res
+
+
+```
+
+
+```{r}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+
+# -----------------------------
+# helper
+# -----------------------------
+depth_label <- function(call_col) {
+  if (str_detect(call_col, "_30x$"))  return("30x")
+  if (str_detect(call_col, "_100x$")) return("100x")
+  if (str_detect(call_col, "_200x$")) return("200x")
+  "Full"
+}
+
+type_label <- function(call_col) {
+  if (str_detect(call_col, "multiread")) "multiread" else "singleton_HC"
+}
+
+# -----------------------------
+# truth definitions
+# -----------------------------
+truth_map <- list(
+  Any4 = c("is_existing_lower_ci_0001_ILLUMINA",
+           "is_existing_lower_ci_0001_DUPLEX_UDSEQ",
+           "is_existing_lower_ci_0001_DUPLEX_NANOSEQ",
+           "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ"),
+  Illumina = c("is_existing_lower_ci_0001_ILLUMINA"),
+  UDSeq = c("is_existing_lower_ci_0001_DUPLEX_UDSEQ"),
+  NanoSeq = c("is_existing_lower_ci_0001_DUPLEX_NANOSEQ"),
+  HiDEFseq = c("is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ")
+)
+
+call_cols <- c(call_cols_ppmSeq_multiread,
+               call_cols_ppmSeq_singleton)
+
+# -----------------------------
+# compute TP / FP only
+# -----------------------------
+res_prec <- bind_rows(lapply(call_cols, function(cc) {
+
+  pred <- filt[[cc]] == 1
+  n_calls <- sum(pred, na.rm = TRUE)
+
+  bind_rows(lapply(names(truth_map), function(tname) {
+
+    truth_mat <- filt[, truth_map[[tname]], drop = FALSE]
+    truth <- rowSums(truth_mat == 1, na.rm = TRUE) >= 1
+
+    TP <- sum(pred & truth, na.rm = TRUE)
+    FP <- sum(pred & !truth, na.rm = TRUE)
+
+    precision <- if ((TP+FP)==0) NA_real_ else TP/(TP+FP)
+
+    tibble(
+      call_col = cc,
+      depth = depth_label(cc),
+      ppm_type = type_label(cc),
+      truth_def = tname,
+      TP = TP,
+      FP = FP,
+      n_calls = TP + FP,
+      precision = precision,
+      FDR = 1 - precision
+    )
+
+  }))
+
+})) %>%
+  mutate(
+    depth = factor(depth, levels = c("30x","100x","200x","Full"))
+  )
+
+# -----------------------------
+# 1️⃣ Precision line plot
+# -----------------------------
+ggplot(res_prec,
+       aes(x=depth, y=precision,
+           color=truth_def, group=truth_def)) +
+  geom_line(linewidth=0.9) +
+  geom_point(size=2.5) +
+  facet_wrap(~ppm_type) +
+  theme_classic(base_size=14) +
+  labs(y="Precision", x="Depth", color="Truth")
+
+# -----------------------------
+# 3️⃣ TP count
+# -----------------------------
+ggplot(res_prec,
+       aes(x=depth, y=TP,
+           color=truth_def, group=truth_def)) +
+  geom_line(linewidth=0.9) +
+  geom_point(size=2.5) +
+  facet_wrap(~ppm_type) +
+  theme_classic(base_size=14) +
+  labs(y="BAM-level validation count (TP)", x="Depth", color="Truth")
+
+```
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(scales)
+
+# ---- depth tick labels with (calls=...) for each ppm_type ----
+tick_calls <- res_prec %>%
+  distinct(depth, ppm_type, n_calls) %>%
+  arrange(ppm_type, depth) %>%
+  mutate(tick = paste0(as.character(depth), "\n(calls=", n_calls, ")"))
+
+tick_map <- tick_calls %>%
+  select(ppm_type, depth, tick) %>%
+  tidyr::pivot_wider(names_from = depth, values_from = tick)
+
+make_depth_ticks <- function(ppm_type) {
+  z <- tick_calls %>% filter(ppm_type == !!ppm_type)
+  setNames(z$tick, z$depth)
+}
+
+# ---- common theme: add grid (not too heavy) ----
+theme_grid <- function() {
+  theme_classic(base_size = 14) +
+    theme(
+      panel.grid.major = element_line(color = "grey88", linewidth = 0.4),
+      panel.grid.minor = element_line(color = "grey93", linewidth = 0.25),
+      axis.text.x = element_text(lineheight = 0.95)
+    )
+}
+
+plot_precision <- function(df, ppm_type_label, upper=1, step=0.1) {
+  depth_ticks <- make_depth_ticks(ppm_type_label)
+
+  ggplot(df %>% filter(ppm_type == ppm_type_label),
+         aes(x = depth, y = precision, color = truth_def, group = truth_def)) +
+    geom_line(linewidth = 0.9) +
+    geom_point(size = 2.3) +
+    scale_x_discrete(labels = depth_ticks) +
+    scale_y_continuous(limits = c(0, upper),
+                        breaks = seq(0, upper, by = step),
+                        labels = label_number(accuracy = 0.01)) +
+    labs(
+      title = paste0("ppmSeq ", ppm_type_label, " - Precision"),
+      x = "Depth",
+      y = "Precision",
+      color = "Truth"
+    ) +
+    theme_grid()
+}
+
+plot_tp <- function(df, ppm_type_label) {
+  depth_ticks <- make_depth_ticks(ppm_type_label)
+
+  ggplot(df %>% filter(ppm_type == ppm_type_label),
+         aes(x = depth, y = TP, color = truth_def, group = truth_def)) +
+    geom_line(linewidth = 0.9) +
+    geom_point(size = 2.3) +
+    scale_x_discrete(labels = depth_ticks) +
+    labs(
+      title = paste0("ppmSeq ", ppm_type_label, " - TP"),
+      x = "Depth",
+      y = "BAM-level validation count (TP)",
+      color = "Truth"
+    ) +
+    theme_grid()
+}
+
+# ---- 4 plots ----
+p_prec_multi <- plot_precision(res_prec, "multiread", 0.5, 0.1)
+p_tp_multi   <- plot_tp(res_prec, "multiread")
+p_prec_sing  <- plot_precision(res_prec, "singleton_HC", 0.1, 0.02)
+p_tp_sing    <- plot_tp(res_prec, "singleton_HC")
+
+p_prec_multi
+p_tp_multi
+p_prec_sing
+p_tp_sing
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(ggplot2)
+
+depth_label <- function(call_col) {
+  if (str_detect(call_col, "_30x$"))  return("30x")
+  if (str_detect(call_col, "_100x$")) return("100x")
+  if (str_detect(call_col, "_200x$")) return("200x")
+  "Full"
+}
+
+# ----- multiread only -----
+pta_m <- bind_rows(lapply(call_cols_ppmSeq_multiread, function(cc) {
+  filt %>%
+    filter(.data[[cc]] == 1,
+           existing_any_PTA1_16_number >= 1) %>%
+    transmute(
+      depth = depth_label(cc),
+      pta_n = existing_any_PTA1_16_number
+    )
+}))
+
+pta_m <- pta_m %>%
+  mutate(
+    depth = factor(depth, levels = c("30x","100x","200x","Full")),
+    pta_n = factor(pta_n)
+  )
+
+pta_count <- pta_m %>%
+  count(depth, pta_n)
+
+ggplot(pta_count,
+       aes(x = pta_n, y = n, fill = depth)) +
+  geom_col(width = 0.8, color = "grey30") +
+  facet_grid(depth ~ ., scales = "free_y") +
+  scale_fill_manual(values = c(
+    "30x"  = "#4E79A7",
+    "100x" = "#F28E2B",
+    "200x" = "#59A14F",
+    "Full" = "#E15759"
+  )) + scale_y_continuous(breaks = function(x) pretty(x))+
+  theme_classic(base_size = 14) +
+  theme(
+    panel.grid.major.y = element_line(color="grey88", linewidth=0.4),
+    panel.grid.minor.y = element_line(color="grey93", linewidth=0.25),
+    legend.position = "none"
+  ) +
+  labs(
+    x = "existing_any_PTA1_16_number (≥1)",
+    y = "Absolute count"
+  )
+
+```
+
+
+
+
+```{r}
+library(dplyr)
+library(stringr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+
+depth_label <- function(call_col) {
+  if (str_detect(call_col, "_30x$"))  return("30x")
+  if (str_detect(call_col, "_100x$")) return("100x")
+  if (str_detect(call_col, "_200x$")) return("200x")
+  "Full"
+}
+
+# ---- truth definitions (your version) ----
+truth_map <- list(
+  Any4 = c("is_existing_lower_ci_0001_DUPLEX_PPMSEQ",
+           "is_existing_lower_ci_0001_DUPLEX_UDSEQ",
+           "is_existing_lower_ci_0001_DUPLEX_NANOSEQ",
+           "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ"),
+  PPMSEQ = c("is_existing_lower_ci_0001_DUPLEX_PPMSEQ"),
+  UDSeq = c("is_existing_lower_ci_0001_DUPLEX_UDSEQ"),
+  NanoSeq = c("is_existing_lower_ci_0001_DUPLEX_NANOSEQ"),
+  HiDEFseq = c("is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ")
+)
+
+call_cols <- call_cols_illumina  # Illumina only
+
+# ---- compute TP/FP/precision per depth ----
+res_prec <- bind_rows(lapply(call_cols, function(cc) {
+
+  pred <- filt[[cc]] == 1
+  n_calls <- sum(pred, na.rm = TRUE)
+
+  bind_rows(lapply(names(truth_map), function(tname) {
+
+    truth_mat <- filt[, truth_map[[tname]], drop = FALSE]
+    truth <- rowSums(truth_mat == 1, na.rm = TRUE) >= 1
+
+    TP <- sum(pred & truth, na.rm = TRUE)
+    FP <- sum(pred & !truth, na.rm = TRUE)
+
+    precision <- if ((TP+FP)==0) NA_real_ else TP/(TP+FP)
+
+    tibble(
+      call_col = cc,
+      depth = depth_label(cc),
+      truth_def = tname,
+      TP = TP,
+      FP = FP,
+      n_calls = TP + FP,
+      precision = precision,
+      FDR = 1 - precision
+    )
+  }))
+})) %>%
+  mutate(depth = factor(depth, levels = c("30x","100x","200x","Full"))) %>%
+  arrange(depth, truth_def)
+
+# ---- depth ticks: include calls per depth (Illumina only) ----
+tick_calls <- res_prec %>%
+  distinct(depth, n_calls) %>%
+  arrange(depth) %>%
+  mutate(tick = paste0(as.character(depth), "\n(calls=", n_calls, ")"))
+
+depth_ticks <- setNames(tick_calls$tick, tick_calls$depth)
+
+# ---- theme with grid ----
+theme_grid <- function() {
+  theme_classic(base_size = 14) +
+    theme(
+      panel.grid.major = element_line(color = "grey88", linewidth = 0.4),
+      panel.grid.minor = element_line(color = "grey93", linewidth = 0.25),
+      axis.text.x = element_text(lineheight = 0.95)
+    )
+}
+
+# ---- plots (Illumina only) ----
+plot_precision_illumina <- function(df, upper = 1, step = 0.1) {
+  ggplot(df, aes(x = depth, y = precision, color = truth_def, group = truth_def)) +
+    geom_line(linewidth = 0.9) +
+    geom_point(size = 2.3) +
+    scale_x_discrete(labels = depth_ticks) +
+    scale_y_continuous(
+      limits = c(0, upper),
+      breaks = seq(0, upper, by = step),
+      labels = label_number(accuracy = 0.01)
+    ) +
+    labs(
+      title = "Illumina calls - Precision",
+      x = "Depth",
+      y = "Precision",
+      color = "Truth"
+    ) +
+    theme_grid()
+}
+
+plot_tp_illumina <- function(df) {
+  ggplot(df, aes(x = depth, y = TP, color = truth_def, group = truth_def)) +
+    geom_line(linewidth = 0.9) +
+    geom_point(size = 2.3) +
+    scale_x_discrete(labels = depth_ticks) +
+    labs(
+      title = "Illumina calls - TP",
+      x = "Depth",
+      y = "BAM-level validation count (TP)",
+      color = "Truth"
+    ) +
+    theme_grid()
+}
+
+p_prec <- plot_precision_illumina(res_prec, upper = 0.5, step = 0.05)
+p_tp   <- plot_tp_illumina(res_prec)
+
+p_prec
+p_tp
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+library(ggplot2)
+
+depth_label <- function(call_col) {
+  if (str_detect(call_col, "_30x$"))  return("30x")
+  if (str_detect(call_col, "_100x$")) return("100x")
+  if (str_detect(call_col, "_200x$")) return("200x")
+  "Full"
+}
+
+# ----- multiread only -----
+pta_m <- bind_rows(lapply(call_cols_illumina, function(cc) {
+  filt %>%
+    filter(.data[[cc]] == 1,
+           existing_any_PTA1_16_number >= 1) %>%
+    transmute(
+      depth = depth_label(cc),
+      pta_n = existing_any_PTA1_16_number
+    )
+}))
+
+pta_m <- pta_m %>%
+  mutate(
+    depth = factor(depth, levels = c("30x","100x","200x","Full")),
+    pta_n = factor(pta_n)
+  )
+
+pta_count <- pta_m %>%
+  count(depth, pta_n)
+
+ggplot(pta_count,
+       aes(x = pta_n, y = n, fill = depth)) +
+  geom_col(width = 0.8, color = "grey30") +
+  facet_grid(depth ~ ., scales = "free_y") +
+  scale_fill_manual(values = c(
+    "30x"  = "#4E79A7",
+    "100x" = "#F28E2B",
+    "200x" = "#59A14F",
+    "Full" = "#E15759"
+  )) + scale_y_continuous(breaks = function(x) pretty(x))+
+  theme_classic(base_size = 14) +
+  theme(
+    panel.grid.major.y = element_line(color="grey88", linewidth=0.4),
+    panel.grid.minor.y = element_line(color="grey93", linewidth=0.25),
+    legend.position = "none"
+  ) +
+  labs(
+    x = "existing_any_PTA1_16_number (≥1)",
+    y = "Absolute count"
+  )
+
+
+```
+
+```{r}
+library(dplyr)
+library(stringr)
+
+depth_label <- function(call_col) {
+  if (str_detect(call_col, "_30x$"))  return("30x")
+  if (str_detect(call_col, "_100x$")) return("100x")
+  if (str_detect(call_col, "_200x$")) return("200x")
+  "Full"
+}
+
+amp_col <- "AmpliSeq"  # <-- 실제 컬럼명으로 수정
+
+amp_tbl <- bind_rows(lapply(call_cols_illumina, function(cc) {
+  filt %>%
+    summarise(
+      depth = depth_label(cc),
+      n_calls = sum(.data[[cc]] == 1, na.rm = TRUE),
+      n_amp_plus = sum(.data[[cc]] == 1 & .data[[amp_col]] == 1, na.rm = TRUE)
+    )
+})) %>%
+  mutate(
+    depth = factor(depth, levels = c("30x","100x","200x","Full")),
+    frac = n_amp_plus / n_calls
+  ) %>%
+  arrange(depth)
+
+amp_tbl
+
+```
+
+
+```{r}
+
+library(readr)
+library(dplyr)
+library(pscl)
+library(ggplot2)
+library(tidyr)
+
+# ---- load ----
+hist_df <- read_tsv("coverage/ppmseq_7614_coverage_hist.merged.tsv",
+                    show_col_types = FALSE) %>%
+  dplyr::select(depth, count) %>%
+  mutate(depth = as.integer(depth),
+         count = as.numeric(count)) %>%
+  arrange(depth)
+
+total <- sum(hist_df$count)
+zero_count <- hist_df$count[match(0L, hist_df$depth)]
+if (is.na(zero_count)) zero_count <- 0
+obs_coverage <- 1 - (zero_count / total)
+
+# ---- fit ----
+dat <- hist_df %>% mutate(y = depth, w = count)
+
+m_zip  <- zeroinfl(y ~ 1 | 1, data = dat, weights = w, dist = "poisson")
+m_zinb <- zeroinfl(y ~ 1 | 1, data = dat, weights = w, dist = "negbin")
+
+zip_pi     <- plogis(unname(m_zip$coefficients$zero[1]))
+zip_lambda <- exp(unname(m_zip$coefficients$count[1]))
+
+zinb_pi    <- plogis(unname(m_zinb$coefficients$zero[1]))
+zinb_mu    <- exp(unname(m_zinb$coefficients$count[1]))
+zinb_theta <- m_zinb$theta
+zinb_alpha <- 1 / zinb_theta
+# ---- pmf ----
+pmf_zip <- function(k, pi, lambda){
+  ifelse(k == 0,
+         pi + (1 - pi) * dpois(0, lambda),
+         (1 - pi) * dpois(k, lambda))
+}
+
+pmf_zinb <- function(k, pi, mu, theta){
+  ifelse(k == 0,
+         pi + (1 - pi) * dnbinom(0, mu = mu, size = theta),
+         (1 - pi) * dnbinom(k, mu = mu, size = theta))
+}
+
+max_depth <- max(hist_df$depth)
+ks <- 0:max_depth
+
+pred_df <- tibble(
+  depth = ks,
+  ZIP  = pmf_zip(ks, zip_pi, zip_lambda),
+  ZINB = pmf_zinb(ks, zinb_pi, zinb_mu, zinb_theta)
+) %>%
+  pivot_longer(cols = c(ZIP, ZINB),
+               names_to = "model",
+               values_to = "prob")
+
+plot_df <- hist_df %>%
+  mutate(frac = count / sum(count))
+
+ggplot(plot_df, aes(depth, frac)) +
+  geom_col(fill="grey80") +
+  geom_line(data=pred_df,
+            aes(depth, prob, colour=model),
+            linewidth=1) +
+  scale_y_continuous(labels=function(x) sprintf("%.0f%%",100*x)) +
+  labs(title="ZIP vs ZINB fit",
+       subtitle=paste0(
+         "ZIP: pi=",round(zip_pi,3),
+         ", lambda=",round(zip_lambda,2),
+         " | ZINB: pi=",round(zinb_pi,3),
+         ", mu=",round(zinb_mu,2),
+         ", alpha=",round(zinb_alpha,3),
+         " | coverage=",round(100*obs_coverage,1),"%"
+       ),
+       x="Depth",
+       y="Fraction of loci") +
+  theme_bw()
+
+```
+
+```{r}
+library(readr)
+library(dplyr)
+library(glmmTMB)
+
+hist_df <- read_tsv("coverage/ppmseq_7614_coverage_hist.merged.tsv",
+                    show_col_types = FALSE) %>%
+  dplyr::select(depth, count) %>%
+  mutate(depth = as.integer(depth),
+         count = as.numeric(count)) %>%
+  arrange(depth)
+
+# Expand histogram into per-locus vector (can be big; use weighted approach instead)
+# glmmTMB supports weights directly
+dat <- hist_df %>% transmute(y = depth, w = count)
+
+m_zinb <- glmmTMB(
+  y ~ 1,
+  ziformula = ~ 1,
+  family = nbinom2(),   # NB2: Var = mu + mu^2/theta  => alpha = 1/theta
+  weights = w,
+  data = dat
+)
+
+# Parameters
+zinb_pi <- plogis(unname(fixef(m_zinb)$zi[1]))     # zero-inflation mixing pi
+zinb_mu <- exp(unname(fixef(m_zinb)$cond[1]))      # mean mu
+zinb_theta <- sigma(m_zinb)                        # theta in nbinom2
+zinb_alpha <- 1 / zinb_theta                       # alpha (NB2)
+
+c(pi = zinb_pi, mu = zinb_mu, theta = zinb_theta, alpha = zinb_alpha)
+
+```
+
+
+```{r}
+library(readr)
+library(dplyr)
+library(ggplot2)
+library(ggrepel)
+library(stringr)
+
+
+in_tsv <- "all_fits.zip_zinb.tsv"
+out_png <- "coverage_vs_alpha.pretty.png"
+
+# Fix header issue: missing tab between ZINB_alpha and ZINB_loglik
+lines <- readLines(in_tsv, warn = FALSE)
+stopifnot(length(lines) > 0)
+lines[1] <- gsub("ZINB_alphaZINB_loglik", "ZINB_alpha\tZINB_loglik", lines[1], fixed = TRUE)
+
+tmp <- tempfile(fileext = ".tsv")
+writeLines(lines, tmp)
+
+df <- read_tsv(tmp, show_col_types = FALSE)
+#df <- df %>%
+#  mutate(
+#    sample = ifelse(stringr::str_detect(sample, "7614"), 
+#                    sample, 
+#                    paste0(sample, "_7614"))
+#  )
+
+df <- df %>%
+  mutate(
+    sample = ifelse(
+      !stringr::str_detect(sample, "7614") & 
+      !stringr::str_detect(sample, "6566"),
+      paste0(sample, "_7614"),
+      sample
+    )
+  )
+
+df2 <- df %>%
+  mutate(
+    coverage_pct = as.numeric(coverage_pct),
+    ZINB_alpha = as.numeric(ZINB_alpha),
+    family = as.character(family),
+    sample = as.character(sample)
+  ) %>%
+  filter(is.finite(coverage_pct), is.finite(ZINB_alpha))
+df2 <- df2 %>%
+  mutate(
+    shape_group = dplyr::case_when(
+      stringr::str_detect(sample, "6566") ~ "6566",
+      stringr::str_detect(sample, "7614") ~ "7614",
+      TRUE ~ "other"
+    )
+  )
+
+
+# R-valid colors (hex)
+fam_cols <- c(
+  illumina = "#1f77b4",  # blue
+  nanoseq  = "#ff7f0e",  # orange
+  ppmseq   = "#2ca02c",  # green
+  udseq    = "#d62728",  # red
+  pta      = "#9467bd",  # purple
+  hidef    = "#000000",  # black
+  other    = "#7f7f7f"   # gray
+)
+
+# Auto log-y if alpha dynamic range is large
+alpha_ratio <- max(df2$ZINB_alpha, na.rm = TRUE) / max(min(df2$ZINB_alpha, na.rm = TRUE), 1e-12)
+use_logy <- is.finite(alpha_ratio) && alpha_ratio > 20
+
+p <- ggplot(df2, aes(x = coverage_pct, y = ZINB_alpha, color = family, shape = shape_group)) +
+  geom_point(size = 3, alpha = 0.9) +
+  ggrepel::geom_text_repel(
+    aes(label = sample),
+    size = 3,
+    max.overlaps = Inf,
+    box.padding = 0.35,
+    point.padding = 0.25,
+    min.segment.length = 0,
+    seed = 1
+  ) +
+  scale_shape_manual(
+    values = c(
+      "6566" = 17,   # triangle
+      "7614" = 16,   # circle
+      "other" = 16
+    )
+  ) +
+  scale_color_manual(values = fam_cols, drop = FALSE) +
+  labs(
+    x = "Theoretical genomic coverage (%) = non-zero / total",
+    y = if (use_logy) "Over-dispersion parameter (log10)" else "Over-dispersion parameter ",
+    title = "Coverage vs overdispersion of covered read number"
+  ) +
+  theme_bw(base_size = 12) +
+  theme(
+    legend.position = "right",
+    panel.grid.minor = element_blank()
+  )
+
+if (use_logy) p <- p + scale_y_log10()
+
+#ggsave(out_png, p, width = 8.5, height = 6.5, dpi = 300)
+p
+
+
+```
+
+```{r}
+set.seed(42)
+
+
+
+rdselect_call300_30x <- purrr::map_dfr(call_cols_30x, function(cc) {
+
+  idx <- which(filt[[cc]] == 1)
+  if (length(idx) == 0) return(NULL)
+
+  take_n <- min(300, length(idx))
+  sel_idx <- sample(idx, take_n, replace = FALSE)
+
+  filt[sel_idx, ] %>%
+    dplyr::mutate(source_call = cc)
+}) %>%
+  dplyr::distinct(chr, pos, ref, alt, .keep_all = TRUE)
+
+
+rdselect_call1000 <- purrr::map_dfr(call_cols_full_depth, function(cc) {
+
+  idx <- which(filt[[cc]] == 1)
+  if (length(idx) == 0) return(NULL)
+
+  take_n <- min(1000, length(idx))
+  sel_idx <- sample(idx, take_n, replace = FALSE)
+
+  filt[sel_idx, ] %>%
+    dplyr::mutate(source_call = cc)
+}) %>%
+  dplyr::distinct(chr, pos, ref, alt, .keep_all = TRUE)
+
+
+
+
+rdselect_bam5000 <- purrr::map_dfr(support_cols, function(cc) {
+  
+  idx <- which(filt[[cc]] == 1)
+  if (length(idx) == 0) return(NULL)
+  
+  take_n <- min(5000, length(idx))
+  sel_idx <- sample(idx, take_n, replace = FALSE)
+  
+  filt[sel_idx, ] %>%
+    dplyr::mutate(source_bam = cc)
+})
+
+rdselect_bam5000 <- rdselect_bam5000 %>%
+  dplyr::distinct(chr, pos, ref, alt, .keep_all = TRUE)
+```
+
+
+```{r}
+library(dplyr)
+library(stringr)
+library(UpSetR)
+
+# support_cols is given by you (e.g. is_existing_lower_ci_0001_* columns)
+support_cols <- exist_cols_full
+#support_cols <- exist_cols_200x
+#support_cols <- exist_cols_100x
+#support_cols <- exist_cols_30x
+
+
+# ---- Build matrix for UpSetR (missing cols -> 0) ----
+make_mat_strata <- function(df, cols) {
+  out <- lapply(cols, function(x) {
+    if (x %in% colnames(df)) as.integer(df[[x]] %in% 1) else rep(0L, nrow(df))
+  })
+  mat <- as.data.frame(out, check.names = FALSE)
+  colnames(mat) <- cols
+  rownames(mat) <- NULL
+  mat
+}
+
+# ---- Pretty BAM labels from support_cols ----
+pretty_plat <- function(x) {
+  x %>%
+    str_remove("^is_existing_lower_ci_0001_") %>%
+    str_remove("^DUPLEX_")
+}
+
+# ---- BAM evidence matrix ----
+
+big_tsv <- filt
+#big_tsv <- rdselect_call300
+#big_tsv <- rdselect_call500
+#big_tsv <- rdselect_call1000
+#big_tsv <- rdselect_call300_30x
+mat_bam <- make_mat_strata(big_tsv, support_cols)
+
+# rename columns to platform labels (ILLUMINA, PPMSEQ, UDSEQ, NANOSEQ, HIDEFSEQ)
+colnames(mat_bam) <- pretty_plat(colnames(mat_bam))
+
+# enforce your order (if you want)
+#bam_order <- c("ILLUMINA","PPMSEQ","UDSEQ","NANOSEQ","HIDEFSEQ")
+#colnames(mat_bam) <- factor(colnames(mat_bam), levels = bam_order) %>% as.character()
+#mat_bam <- mat_bam[, bam_order, drop = FALSE]
+mat_bam_filt <- mat_bam %>%
+  mutate(.k = rowSums(dplyr::select(., everything()) > 0)) %>%  # number of supporting platforms per row
+  #filter(.k >= 2) %>%
+  dplyr::select(-.k)
+
+# ---- Plot ----
+upset(
+  mat_bam_filt,
+  nsets = ncol(mat_bam_filt),
+  nintersects = 200,
+  keep.order = TRUE,
+  order.by = "freq",
+  mainbar.y.label = "Intersection size",
+  sets.x.label = "Set size"
+)
+
+big_tsv %>% dplyr::select(call_cols_full_depth) %>% colSums(.)
+
+big_tsv %>% dplyr::select(support_cols) %>% dplyr::select(-existing_any_PTA1_16_multiple ) %>% colSums(.)
+
+#rdselect_call1000 %>% write_tsv("rdselect_call1000.tsv")
+```
+
+
+```{r}
+library(dplyr)
+r_overpois <- function(n, lambda, alpha) {
+  shape <- 1 / alpha
+  rate  <- 1 / (alpha * lambda)
+  
+  lam_g <- rgamma(n, shape = shape, rate = rate)
+  rpois(n, lam_g)
+}
+#%>% ggplot(., aes(x=count))+geom_histogram(, binwidth = 10)
+
+k_poi <- rpois(1000, 100) %>% as.data.frame(.) %>% setNames("count") %>% dplyr::mutate(distn="poisson")
+k_overpoi_003 <- r_overpois(1000,100,0.03) %>% as.data.frame(.) %>% setNames("count") %>% dplyr::mutate(distn="negbinom")
+
+
+k_poi_overpoi_003 <- bind_rows(k_poi, k_overpoi_003)
+
+k_poi_overpoi_003 %>% ggplot(., aes(x=count, fill=distn))+geom_histogram(binwidth = 5, position="dodge")
+
+
+k_poi <- rpois(1000, 100) %>% as.data.frame(.) %>% setNames("count") %>% dplyr::mutate(distn="poisson")
+
+k_overpoi_012 <- r_overpois(1000,100,0.12) %>% as.data.frame(.) %>% setNames("count") %>% dplyr::mutate(distn="negbinom")
+
+
+k_poi_overpoi_012 <- bind_rows(k_poi, k_overpoi_012)
+
+k_poi_overpoi_012 %>% ggplot(., aes(x=count, fill=distn))+geom_histogram(binwidth = 5, position="dodge")
+
+```
+
+
+```{r}
+
+library(dplyr)
+library(ComplexHeatmap)
+library(circlize)
+library(stringr)
+
+
+trin <- read_tsv("trinuc32_all_methods_wide.tsv")
+
+# ---- 1) matrix + normalize (each column sums to 1) ----
+mat_raw <- trin %>%
+  tibble::column_to_rownames("trinuc") %>%
+  as.matrix()
+
+mat_norm <- apply(mat_raw, 2, function(x) x / sum(x))
+
+# ---- 2) cosine similarity + distance(for clustering) ----
+cos_sim <- function(m) {
+  m_scaled <- apply(m, 2, function(x) x / sqrt(sum(x^2)))
+  t(m_scaled) %*% m_scaled
+}
+
+sim_mat  <- cos_sim(mat_norm)
+dist_mat <- 1 - sim_mat  # cosine distance
+
+# ---- 3) clustering by cosine distance ----
+hc <- hclust(as.dist(dist_mat), method = "average")
+
+# ---- 4) annotation (same as you had) ----
+samples <- colnames(dist_mat)
+
+tissue <- dplyr::case_when(
+  str_detect(samples, "7614") ~ "7614",
+  str_detect(samples, "6566_blood") ~ "6566_blood",
+  str_detect(samples, "6566_sperm") ~ "6566_sperm",
+  str_detect(samples, "(^|_)6566($|_)") ~ "6566_sperm",
+  str_detect(samples, "ref_hg38") ~ "reference",
+  TRUE ~ "unknown"
+)
+
+platform <- dplyr::case_when(
+  str_detect(samples, "^ppmseq") ~ "ppmseq",
+  str_detect(samples, "^illumina") ~ "illumina",
+  str_detect(samples, "^nanoseq") ~ "nanoseq",
+  str_detect(samples, "^udseq") ~ "udseq",
+  str_detect(samples, "^hidef") ~ "hidef",
+  str_detect(samples, "^PTA") ~ "PTA",
+  str_detect(samples, "ref_hg38") ~ "reference",
+  TRUE ~ "other"
+)
+
+ha <- HeatmapAnnotation(
+  tissue = tissue,
+  platform = platform,
+  col = list(
+    tissue = c(
+      "7614" = "#1b9e77",
+      "6566_sperm" = "#d95f02",
+      "6566_blood" = "#7570b3",
+      "reference" = "grey40",
+      "unknown" = "grey80"
+    ),
+    platform = c(
+      ppmseq = "#66c2a5",
+      illumina = "#fc8d62",
+      nanoseq = "#8da0cb",
+      udseq = "#e78ac3",
+      hidef = "#a6d854",
+      PTA = "#ffd92f",
+      reference = "black",
+      other = "grey50"
+    )
+  ),
+  annotation_name_side = "left"
+)
+
+# ---- 5) log-scale coloring on distance, but legend labels in distance units ----
+
+# Make diagonal NA (so it doesn't dominate; dist=0 => log blow-up)
+dist_mat2 <- dist_mat
+diag(dist_mat2) <- NA_real_
+
+# z is what we actually plot for colors
+z_mat <- -log10(dist_mat2)
+diag(z_mat) <- NA_real_
+
+# Robust range from off-diagonal only
+z_off <- z_mat[upper.tri(z_mat)]
+z_off <- z_off[is.finite(z_off)]
+z_lo <- as.numeric(quantile(z_off, 0.05, names = FALSE))
+z_hi <- as.numeric(quantile(z_off, 0.995, names = FALSE))
+
+col_fun <- colorRamp2(
+  c(z_lo, (z_lo + z_hi) / 2, z_hi),
+  c("#440154", "#fdae61", "#ffffbf")
+)
+
+# Legend ticks: choose integer z ticks within range (cap to <=5 ticks)
+k_min <- max(0, floor(z_lo))
+k_max <- max(k_min + 1, ceiling(z_hi))
+k_all <- seq(k_min, k_max)
+
+if (length(k_all) > 5) {
+  k_at <- unique(round(seq(k_min, k_max, length.out = 5)))
+} else {
+  k_at <- k_all
+}
+
+legend_labels <- ifelse(
+  k_at == 0,
+  "1",
+  paste0("1e-", k_at)
+)
+
+alpha <- 0.25
+hc2 <- hc
+hc2$height <- hc$height^alpha
+
+ht <- Heatmap(
+  z_mat,
+  name = "Cosine Distance",
+  col = col_fun,
+  na_col = "white",
+  cluster_rows = as.dendrogram(hc2),
+  cluster_columns = as.dendrogram(hc2),
+  row_dend_width = grid::unit(40, "mm"),        
+  column_dend_height = grid::unit(40, "mm"),    
+  top_annotation = ha,
+  row_names_side = "left",
+  column_names_rot = 90,
+  heatmap_legend_param = list(
+    title = "Cosine Distance",
+    at = rev(k_at),
+    labels = rev(legend_labels)
+  )
+)
+
+pdf()
+draw(ht)
+```
+
+
+
+
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(ggplot2)
+})
+
+df <- tibble::tribble(
+  ~denovo,   ~cosmic, ~pct,
+  "SBS96A","SBS5",79.12,
+  "SBS96A","SBS16",14.82,
+  "SBS96A","SBS1",6.06,
+  "SBS96B","SBS5",55.00,
+  "SBS96B","SBS8",32.48,
+  "SBS96B","SBS1",12.52,
+  "SBS96C","SBS32",40.22,
+  "SBS96C","SBS30",24.46,
+  "SBS96C","SBS58",23.50,
+  "SBS96C","SBS2",11.82
+)
+
+aetiology_map <- c(
+  SBS1="Aging",
+  SBS5="Aging",
+  SBS2="APOBEC",
+  SBS8="Unknown",
+  SBS16="CWalsh_neuron_TC-NER",
+  SBS30="Base_excision_repair",
+  SBS32="CWalsh_oligodendrocyte",
+  SBS58="Artifact"
+)
+
+df <- df %>%
+  mutate(
+    aetiology = aetiology_map[cosmic],
+    cosmic = factor(cosmic,
+                    levels=c("SBS1","SBS5","SBS8","SBS16",
+                             "SBS30","SBS32","SBS58","SBS2")),
+    denovo = factor(denovo,
+                    levels=c("SBS96A","SBS96B","SBS96C"))
+  )
+
+cols <- c(
+  Aging="#2f5d3a",
+  APOBEC="#e67e22",
+  Unknown="grey70",
+  "CWalsh_neuron_TC-NER"="#7b3f8c",
+  Base_excision_repair="#d98aa6",
+  CWalsh_oligodendrocyte="#5b2a86",
+  Artifact="#efe6b5"
+)
+
+ggplot(df, aes(cosmic, denovo)) +
+  geom_point(aes(size=pct, fill=aetiology),
+             shape=21, colour="black", stroke=0.4) +
+  geom_text(aes(label=sprintf("%.0f", pct)),
+            size=3.2, colour="black") +
+  scale_fill_manual(values=cols) +
+  scale_size(range=c(4,20)) +
+  scale_y_discrete(limits=rev) +
+  theme_bw(base_size=13) +
+  theme(
+    panel.grid.major = element_line(color="grey90"),
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    legend.position="right",
+    legend.title=element_text(face="bold")
+  ) +
+  labs(x=NULL, y=NULL, fill="Aetiology", size="Contribution (%)")
+
+```
+
+```{r}
+mutSig_vcf<-read_tsv("vcf_sig_denovo.tsv")
+cosmic_refit_mutSig_vcf<-read_tsv("vcf_sig_cosmic_refit.tsv")
+vcf_trinuc <- read_tsv("vcf_trinuc.tsv")
+sig_vcf_trinuc <- read_tsv("SBS96_vcf_sig.tsv")
+
+
+mutSig_bamEvidence<-read_tsv("bamEvidence_sig_denovo.tsv")
+cosmic_refit_mutSig_bamEvidence<-read_tsv("bamEvidence_sig_cosmic_refit.tsv")
+bamEvidence_trinuc <- read_tsv("bamEvidence_trinuc.tsv")
+sig_bamEvidence_trinuc <- read_tsv("SBS96_bamEvidence_sig.tsv")
+```
+
+```{r}
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(stringr)
+  library(tidyr)
+  library(ggplot2)
+})
+
+# ---- 1) De novo rename map: SBS96A->Sig1 ... SBS96D->Sig4 ----
+denovo_map <- c(
+  "Signature 96-A" = "Sig1",
+  "Signature 96-B" = "Sig2",
+  "Signature 96-C" = "Sig3",
+  "Signature 96-D" = "Sig4",
+  "SBS96A" = "Sig1",
+  "SBS96B" = "Sig2",
+  "SBS96C" = "Sig3",
+  "SBS96D" = "Sig4"
+)
+
+# ---- 2) Parse "Global NMF Signatures" into long df: (denovo, cosmic, pct) ----
+# cosmic_refit_mutSig_vcf columns:
+# `De novo extracted`, `Global NMF Signatures`, ...
+df_cosmic_refit_mutSig_vcf <- cosmic_refit_mutSig_vcf %>%
+  transmute(
+    denovo_raw = `De novo extracted`,
+    mix_raw = `Global NMF Signatures`
+  ) %>%
+  mutate(
+    denovo = recode(denovo_raw, !!!denovo_map, .default = denovo_raw),
+    # Split by '&'
+    mix_raw = str_replace_all(mix_raw, "\\s*&\\s*", "&"),
+    parts = str_split(mix_raw, "&", simplify = FALSE)
+  ) %>%
+  tidyr::unnest_longer(parts) %>%
+  mutate(
+    parts = str_trim(parts),
+    # Extract SBS id + percent in parentheses
+    cosmic = str_extract(parts, "SBS\\d+"),
+    pct = as.numeric(str_match(parts, "\\(([-0-9.]+)%\\)")[,2])
+  ) %>%
+  filter(!is.na(cosmic), !is.na(pct)) %>%
+  select(denovo, cosmic, pct)
+
+# ---- 3) Plot: bubble, fill by cosmic (pastel), label pct ----
+y_levels <- c("Sig1","Sig2","Sig3","Sig4")
+
+cosmic_cols <- c(
+  SBS1  = "#A8DADC",  # pastel cyan
+  SBS2  = "#F4A261",  # soft orange
+  SBS5  = "#8EC9B8",  # mint
+  SBS8  = "#C9CCD6",  # light grey-lavender
+  SBS16 = "#B8A1D9",  # pastel purple
+  SBS31 = "#F6BD60",  # soft yellow-orange
+  SBS32 = "#9DB4E0"   # pastel blue
+)
+x_levels <- cosmic_cols %>% names(.)
+
+p1<-ggplot(
+  df_cosmic_refit_mutSig_vcf %>%
+    mutate(
+      cosmic = factor(cosmic, levels = x_levels),
+      denovo = factor(denovo, levels = y_levels)
+    )
+) +
+  geom_point(
+    aes(x = cosmic, y = denovo, size = pct, fill = cosmic),
+    shape = 21,
+    color = "grey20",
+    stroke = 0.55
+  ) +
+  geom_text(
+    aes(x = cosmic, y = denovo, label = sprintf("%.1f%%", pct)),
+    size = 3.0,
+    fontface = "bold",
+    lineheight = 0.9
+  ) +
+  scale_fill_manual(values = cosmic_cols, name = "COSMIC") +
+  scale_size(
+    range = c(9, 18),
+    breaks = c(10, 25, 50, 75),
+    name = "Contribution (%)"
+  ) +
+  scale_y_discrete(limits = rev(levels(factor(y_levels)))) +
+  coord_cartesian(clip = "off") +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.major = element_line(color = "grey92", linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    axis.ticks = element_blank(),
+    legend.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+```
+
+
+```{r}
+
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tibble)
+  library(ComplexHeatmap)
+  library(circlize)
+  library(grid)
+})
+
+# ---- make matrix: rows = 96 contexts, cols = samples ----
+mat_96 <- vcf_trinuc %>%
+  as.data.frame() %>%
+  column_to_rownames("MutationType") %>%
+  as.matrix()
+
+# ---- cosine similarity between samples (columns) ----
+cos_sim_cols <- function(m){
+  m_scaled <- apply(m, 2, function(x){
+    s2 <- sum(x^2)
+    if (s2 == 0) return(rep(0, length(x)))
+    x / sqrt(s2)
+  })
+  t(m_scaled) %*% m_scaled
+}
+
+sim_96 <- cos_sim_cols(mat_96)
+
+# ---- cosine distance + clustering ----
+dist_96 <- 1 - sim_96
+dist_96[dist_96 < 0] <- 0
+diag(dist_96) <- 0
+
+hc_96 <- hclust(as.dist(dist_96), method = "average")
+
+
+col_fun <- colorRamp2(
+  c(0, 0.5, 0.75, 0.9, 1),
+  c("#FFFFFF",
+    "#E3EEF9",
+    "#9ECAE1",
+    "#2171B5",
+    "#08306B")
+)
+ht <- Heatmap(
+  sim_96,
+  name = "Cosine\nSimilarity",
+  col = col_fun,
+  cluster_rows = as.dendrogram(hc_96),
+  cluster_columns = as.dendrogram(hc_96),
+  show_row_dend = FALSE,
+  column_dend_height = unit(30, "mm"),
+  row_names_side = "left",
+  column_names_rot = 45,
+  heatmap_legend_param = list(
+    at = c(0, 0.5, 0.75, 0.9, 1),
+    labels = c("0", "0.5", "0.75", "0.9", "1"),
+    title = "Cosine similarity"
+  )
+)
+
+draw(ht)
+
+```
+
+
+```{r}
+suppressPackageStartupMessages({
+  library(ComplexHeatmap)
+  library(circlize)
+  library(grid)
+})
+
+# ---- relative activity (% within each sample) ----
+mat_sig_pct <- apply(mat_raw, 2, function(x){
+  s <- sum(x)
+  if (s == 0) return(rep(0, length(x)))
+  100 * x / s
+})
+mat_sig_pct <- as.matrix(mat_sig_pct)
+rownames(mat_sig_pct) <- rownames(mat_raw)   # Sig1-4
+colnames(mat_sig_pct) <- colnames(mat_raw)   # Samples
+
+# ---- red-ish palette ----
+col_fun_red <- colorRamp2( c(0, 25, 50, 75, 100), c("#FFF5F0", "#FCAE91", "#FB6A4A", "#DE2D26", "#A50F15") )
+col_fun_red <- colorRamp2(
+  c(0, 25, 50, 75, 100),
+  c("#FFFFFF",
+    "#FDE0DD",
+    "#FCAE91",
+    "#FB6A4A",
+    "#CB181D")
+)
+
+ht_sig <- Heatmap(
+  mat_sig_pct,
+  name = "Activity\n(%)",
+  col = col_fun_red,
+  cluster_rows = FALSE,
+  cluster_columns = as.dendrogram(hc_96),   # << keep the 96D dendrogram
+  show_row_dend = FALSE,
+  column_dend_height = unit(30, "mm"),
+  row_names_side = "left",
+  column_names_rot = 90,
+  heatmap_legend_param = list(
+    at = c(0, 25, 50, 75, 100),
+    title = "Activity (%)"
+  ),
+  cell_fun = function(j, i, x, y, w, h, fill){
+    grid.text(sprintf("%.1f", mat_sig_pct[i, j]), x, y, gp = gpar(fontsize = 8))
+  }
+)
+
+draw(ht_sig)
+
+```
+
+```{r}
+mutSig_bamEvidence<-read_tsv("bamEvidence_sig_denovo.tsv")
+cosmic_refit_mutSig_bamEvidence<-read_tsv("bamEvidence_sig_cosmic_refit.tsv")
+bamEvidence_trinuc <- read_tsv("bamEvidence_trinuc.tsv")
+sig_bamEvidence_trinuc <- read_tsv("SBS96_bamEvidence_sig.tsv")
+```
+
+
+```{r}
+## ---- BAM Evidence: bubble (SigA-E vs COSMIC) ----
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(stringr)
+  library(tidyr)
+  library(ggplot2)
+})
+
+# ---- rename map: SBS96A->SigA ... SBS96E->SigE ----
+denovo_map_bam <- c(
+  "Signature 96-SBS96A" = "SigA",
+  "Signature 96-SBS96B" = "SigB",
+  "Signature 96-SBS96C" = "SigC",
+  "Signature 96-SBS96D" = "SigD",
+  "Signature 96-SBS96E" = "SigE",
+  "SBS96A" = "SigA",
+  "SBS96B" = "SigB",
+  "SBS96C" = "SigC",
+  "SBS96D" = "SigD",
+  "SBS96E" = "SigE"
+)
+
+# ---- COSMIC colors (reuse overlaps; add new) ----
+cosmic_cols_bam <- c(
+  SBS1  = "#A8DADC",
+  SBS2  = "#F4A261",
+  SBS3  = "#BFD3E6",
+  SBS4  = "#C7E9C0",
+  SBS5  = "#8EC9B8",
+  SBS12 = "#FDD0A2",
+  SBS16 = "#B8A1D9",
+  SBS31 = "#F6BD60",
+  SBS32 = "#9DB4E0",
+  SBS51 = "#D9D9D9"
+
+  # new in BAM
+
+)
+
+# ---- parse refit table into long df ----
+df_cosmic_refit_mutSig_bamEvidence <- cosmic_refit_mutSig_bamEvidence %>%
+  transmute(
+    denovo_raw = `De novo extracted`,
+    mix_raw = `Global NMF Signatures`
+  ) %>%
+  mutate(
+    denovo = recode(denovo_raw, !!!denovo_map_bam, .default = denovo_raw),
+    mix_raw = str_replace_all(mix_raw, "\\s*&\\s*", "&"),
+    parts = str_split(mix_raw, "&", simplify = FALSE)
+  ) %>%
+  tidyr::unnest_longer(parts) %>%
+  mutate(
+    parts = str_trim(parts),
+    cosmic = str_extract(parts, "SBS\\d+"),
+    pct = as.numeric(str_match(parts, "\\(([-0-9.]+)%\\)")[,2])
+  ) %>%
+  filter(!is.na(cosmic), !is.na(pct)) %>%
+  select(denovo, cosmic, pct)
+
+y_levels_bam <- c("SigA","SigB","SigC","SigD","SigE")
+x_levels_bam <- names(cosmic_cols_bam)
+
+p1_bam <- ggplot(
+  df_cosmic_refit_mutSig_bamEvidence %>%
+    mutate(
+      cosmic = factor(cosmic, levels = x_levels_bam),
+      denovo = factor(denovo, levels = y_levels_bam)
+    )
+) +
+  geom_point(
+    aes(x = cosmic, y = denovo, size = pct, fill = cosmic),
+    shape = 21,
+    color = "grey20",
+    stroke = 0.55
+  ) +
+  geom_text(
+    aes(x = cosmic, y = denovo, label = sprintf("%.1f%%", pct)),
+    size = 3.0,
+    fontface = "bold",
+    lineheight = 0.9
+  ) +
+  scale_fill_manual(values = cosmic_cols_bam, name = "COSMIC") +
+  scale_size(
+    range = c(9, 18),
+    breaks = c(10, 25, 50, 75),
+    name = "Contribution (%)"
+  ) +
+  scale_y_discrete(limits = rev(levels(factor(y_levels_bam)))) +
+  coord_cartesian(clip = "off") +
+  theme_minimal(base_size = 13) +
+  theme(
+    panel.grid.major = element_line(color = "grey92", linewidth = 0.5),
+    panel.grid.minor = element_blank(),
+    axis.title = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    axis.ticks = element_blank(),
+    legend.title = element_text(face = "bold"),
+    legend.position = "right"
+  )
+
+p1_bam
+
+```
+
+```{r}
+## ---- BAM Evidence: sample-sample cosine similarity heatmap (96D) ----
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tibble)
+  library(ComplexHeatmap)
+  library(circlize)
+  library(grid)
+})
+
+# ---- matrix: rows = 96 contexts, cols = samples ----
+mat_96_bam <- bamEvidence_trinuc %>%
+  as.data.frame() %>%
+  column_to_rownames("MutationType") %>%
+  as.matrix()
+
+# ---- cosine similarity between samples (columns) ----
+cos_sim_cols <- function(m){
+  m_scaled <- apply(m, 2, function(x){
+    s2 <- sum(x^2)
+    if (s2 == 0) return(rep(0, length(x)))
+    x / sqrt(s2)
+  })
+  t(m_scaled) %*% m_scaled
+}
+
+sim_96_bam <- cos_sim_cols(mat_96_bam)
+
+# ---- cosine distance + clustering ----
+dist_96_bam <- 1 - sim_96_bam
+dist_96_bam[dist_96_bam < 0] <- 0
+diag(dist_96_bam) <- 0
+hc_96_bam <- hclust(as.dist(dist_96_bam), method = "average")
+
+# ---- color (0-1) ----
+col_fun_blue <- colorRamp2(
+  c(0, 0.5, 0.75, 0.9, 1),
+  c("#FFFFFF", "#E3EEF9", "#9ECAE1", "#2171B5", "#08306B")
+)
+
+ht_bam <- Heatmap(
+  sim_96_bam,
+  name = "Cosine\nSimilarity",
+  col = col_fun_blue,
+  cluster_rows = as.dendrogram(hc_96_bam),
+  cluster_columns = as.dendrogram(hc_96_bam),
+  show_row_dend = FALSE,
+  column_dend_height = unit(30, "mm"),
+  row_names_side = "left",
+  column_names_rot = 45,
+  heatmap_legend_param = list(
+    at = c(0, 0.5, 0.75, 0.9, 1),
+    labels = c("0", "0.5", "0.75", "0.9", "1"),
+    title = "Cosine similarity"
+  )
+)
+
+draw(ht_bam)
+```
+
+```{r}
+## ---- BAM Evidence: sig activity heatmap (SigA-E x Samples), dendrogram = hc_96_bam ----
+suppressPackageStartupMessages({
+  library(dplyr)
+  library(tibble)
+  library(ComplexHeatmap)
+  library(circlize)
+  library(grid)
+})
+
+# ---- matrix: rows = sig, cols = sample ----
+mat_raw_bam <- mutSig_bamEvidence %>%
+  as.data.frame() %>%
+  column_to_rownames("Samples") %>%
+  t()
+
+rownames(mat_raw_bam) <- dplyr::recode(rownames(mat_raw_bam), !!!denovo_map_bam, .default = rownames(mat_raw_bam))
+
+# ---- relative activity (% within each sample) ----
+mat_sig_pct_bam <- apply(mat_raw_bam, 2, function(x){
+  s <- sum(x)
+  if (s == 0) return(rep(0, length(x)))
+  100 * x / s
+})
+mat_sig_pct_bam <- as.matrix(mat_sig_pct_bam)
+rownames(mat_sig_pct_bam) <- rownames(mat_raw_bam)  # SigA-E
+colnames(mat_sig_pct_bam) <- colnames(mat_raw_bam)  # Samples
+
+# ---- red-ish but not too aggressive ----
+col_fun_red <- colorRamp2(
+  c(0, 25, 50, 75, 100),
+  c("#FFFFFF", "#FDE0DD", "#FCAE91", "#FB6A4A", "#CB181D")
+)
+
+ht_sig_bam <- Heatmap(
+  mat_sig_pct_bam,
+  name = "Activity\n(%)",
+  col = col_fun_red,
+  cluster_rows = FALSE,
+  cluster_columns = as.dendrogram(hc_96_bam),
+  show_row_dend = FALSE,
+  column_dend_height = unit(30, "mm"),
+  row_names_side = "left",
+  column_names_rot = 90,
+  heatmap_legend_param = list(
+    at = c(0, 25, 50, 75, 100),
+    title = "Activity (%)"
+  ),
+  cell_fun = function(j, i, x, y, w, h, fill){
+    grid.text(sprintf("%.1f", mat_sig_pct_bam[i, j]), x, y, gp = gpar(fontsize = 8))
+  }
+)
+
+draw(ht_sig_bam)
+```

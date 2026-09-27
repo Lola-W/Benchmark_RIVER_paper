@@ -1,0 +1,11 @@
+Samples	SBS96A	SBS96B	SBS96C	SBS96D
+HiDEFseq_double_stranded	202	62	9	14
+HiDEFseq_single_stranded	0	0	0	3000
+Illumina	394	78	223	68
+NanoSeq_multiread	132	100	69	34
+NanoSeq_singleton	1624	993	256	127
+PTA_singleton	3	2576	203	216
+UDSeq_multiread	873	88	121	84
+UDSeq_singleton	1913	843	0	244
+ppmSeq_multiread	305	262	1579	28
+ppmSeq_singleton_HC	192	436	2206	166

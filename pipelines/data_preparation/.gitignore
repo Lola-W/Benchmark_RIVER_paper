@@ -1,0 +1,12 @@
+work/
+__pycache__/
+.DS_Store
+._*
+*.bam
+*.bai
+*.cram
+*.crai
+*.vcf.gz
+*.tbi
+*.log
+*.err

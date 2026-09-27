@@ -1,0 +1,6 @@
+1. run ./make_sbs96_caller*.py on vcf dir for caller result; on tsv for bam pileup
+2. ./denovo_sigprofilerextractor.py on SBS96
+3. ./replot is using sigprofiler function on de novo results but in log scale, changing figure font/size, etc
+
+simple COSMIC fitting: ./run_SigProfilerAssignment_matrix.py
+Also from de novo sig it has COSMIC depomsition refitting

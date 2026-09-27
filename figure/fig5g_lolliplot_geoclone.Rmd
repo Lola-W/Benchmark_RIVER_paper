@@ -1,0 +1,1695 @@
+---
+title: "lolliplot_geoclone"
+author: "dcha"
+date: "2026-09-01"
+output: html_document
+---
+
+---
+title: "ampli_seq"
+author: "dcha"
+date: "2026-07-27"
+output: html_document
+---
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(tibble)
+```
+
+
+
+### Remove samples that have low depth and heart samples
+```{r}
+# Load final_summary.vcf as 'raw'
+raw<-read_tsv(file="../raw_data/ampli_benchmark_n650_s14.tsv")
+```
+
+```{r}
+see_read_depth_sample <- function(vcf) {
+
+  plot_data <- vcf %>%
+    dplyr::mutate(
+      total_depth = REF_COUNT + ALT_COUNT,
+      log10_depth = log10(total_depth)
+    ) %>%
+    dplyr::filter(is.finite(log10_depth))
+
+  summary_data <- plot_data %>%
+    dplyr::group_by(ID) %>%
+    dplyr::summarise(
+      median = median(total_depth, na.rm = TRUE),
+      mean = mean(total_depth, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    tidyr::pivot_longer(
+      cols = c(median, mean),
+      names_to = "statistic",
+      values_to = "depth"
+    ) %>%
+    dplyr::mutate(
+      log10_depth = log10(depth),
+      label = sprintf("%.0f", depth),
+      label_y = dplyr::if_else(
+        statistic == "median",
+        log10_depth - 0.13,
+        log10_depth + 0.13
+      )
+    )
+
+  plot_data %>%
+    ggplot2::ggplot(
+      ggplot2::aes(
+        x = ID,
+        y = log10_depth
+      )
+    ) +
+    ggplot2::geom_violin() +
+    ggplot2::geom_point(
+      data = summary_data,
+      ggplot2::aes(color = statistic),
+      size = 1.5
+    ) +
+    ggplot2::geom_text(
+      data = summary_data,
+      ggplot2::aes(
+        y = label_y,
+        label = label,
+        color = statistic
+      ),
+      size = 3.0,
+      show.legend = FALSE
+    ) +
+    ggplot2::geom_hline(
+      yintercept = 3,
+      linetype = 2,
+      color = "blue"
+    ) +
+    ggplot2::scale_color_manual(
+      name = NULL,
+      values = c(
+        median = "red",
+        mean = "blue"
+      ),
+      breaks = c("median", "mean")
+    ) +
+    ggplot2::labs(
+      x = NULL,
+      y = expression(log[10]("Read depth"))
+    ) +
+    ggplot2::theme_bw() +
+    ggplot2::theme(
+      axis.text.x = ggplot2::element_text(
+        face = "bold",
+        size = 8,
+        angle = 90,
+        hjust = 1
+      ),
+      legend.position = "top"
+    )
+}
+
+depth_plot <- see_read_depth_sample(raw)
+depth_plot
+```
+
+
+
+#### Here we go with proper filtering
+```{r}
+library(ggplot2)
+library(dplyr)
+library(readr)
+library(tibble)
+
+proper_filter <- function(data) {
+  data %>%
+    dplyr::filter(
+      SEGDUP == FALSE,
+      HOMOPOLYMER == FALSE,
+      DINUCLEOTIDE == FALSE,
+      NEAR_INDEL == FALSE,
+      SIMPLE_REPEAT == 0
+    )
+}
+
+annot_simple <- read_tsv("../raw_data/ampli_raw_annot.simple_repeat.tsv")
+no_jgg2 <- annot_simple %>% dplyr::filter(ID!="JGG-control")
+no_jgg_good_variants2 <- no_jgg2 %>% proper_filter(.)
+
+source_count_df2 <- no_jgg_good_variants2 %>%
+  dplyr::count(SOURCE, name = "num") %>%
+  dplyr::mutate(
+    num = num / 13
+  ) %>%
+  dplyr::rename(
+    source = SOURCE
+  )
+
+```
+
+### Germline het curation
+
+### Upper VAF threshold by germline het candidates
+```{r}
+het_plot_data <- no_jgg_good_variants2 %>%
+  dplyr::filter(
+    SOURCE == "GermlineHeterozygous",
+    !is.na(UPPER_CI)
+  ) %>%
+  dplyr::mutate(
+    tissue = stringr::str_remove(ID, "^7614-"),
+    SUBMIT_NAME = forcats::fct_reorder(
+      SUBMIT_NAME,
+      UPPER_CI,
+      .fun = median,
+      .desc = FALSE
+    )
+  )
+
+het_upper_ci_cutoff <- stats::quantile(
+  het_plot_data$UPPER_CI,
+  probs = 0.025,
+  na.rm = TRUE,
+  names = FALSE
+)
+
+het_upper_ci_plot <- het_plot_data %>%
+  ggplot2::ggplot(
+    ggplot2::aes(
+      x = SUBMIT_NAME,
+      y = UPPER_CI,
+      color = SUBMIT_NAME
+    )
+  ) +
+  ggplot2::geom_jitter(
+    width = 0.15,
+    height = 0,
+    size = 2,
+    alpha = 0.8
+  ) +
+  ggrepel::geom_text_repel(
+    data = het_plot_data %>%
+      dplyr::filter(
+        UPPER_CI < 0.4 | UPPER_CI > 0.8
+      ),
+    ggplot2::aes(label = tissue),
+    size = 2.5,
+    direction = "y",
+    box.padding = 0.2,
+    point.padding = 0.1,
+    min.segment.length = 0,
+    max.overlaps = Inf,
+    show.legend = FALSE
+  ) +
+  ggplot2::stat_summary(
+    fun = median,
+    geom = "point",
+    color = "black",
+    shape = 18,
+    size = 3
+  ) +
+  ggplot2::geom_hline(
+    ggplot2::aes(
+      yintercept = 0.4,
+      linetype = "UPPER_CI = 0.4"
+    ),
+    color = "grey30",
+    linewidth = 0.8
+  ) +
+  ggplot2::geom_hline(
+    ggplot2::aes(
+      yintercept = 0.8,
+      linetype = "UPPER_CI = 0.8"
+    ),
+    color = "grey15",
+    linewidth = 0.8
+  ) +
+  ggplot2::geom_hline(
+    ggplot2::aes(
+      yintercept = het_upper_ci_cutoff,
+      linetype = "Het UPPER_CI 2.5% cutoff"
+    ),
+    color = "red",
+    linewidth = 0.8
+  ) +
+  ggplot2::scale_linetype_manual(
+    name = NULL,
+    values = c(
+      "UPPER_CI = 0.4" = "dotted",     "UPPER_CI = 0.8" = "dotdash",
+      "Het UPPER_CI 2.5% cutoff" = "dashed"
+    )
+  ) +
+  ggplot2::labs(
+    x = "Germline heterozygous variant",
+    y = "Upper 95% CI"
+  ) +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    axis.text.x = ggplot2::element_text(
+      angle = 90,
+      hjust = 1,
+      vjust = 0.5,
+      size = 7
+    ),
+    legend.position = "top"
+  ) +
+  ggplot2::guides(
+    color = "none"
+  )
+
+het_upper_ci_cutoff
+het_upper_ci_plot
+```
+
+```{r}
+no_occipital <- no_jgg_good_variants2 %>% filter(ID!="7614-R-O") %>% filter(ID!="7614-L-O") %>% filter(SUBMIT_NAME!="chr19_53787466_C_G-het")
+
+```
+
+### Upper VAF threshold by germline het candidates after filtering
+```{r}
+het_cutoff_result <- no_occipital %>%
+  dplyr::filter(
+    SOURCE == "GermlineHeterozygous",
+    !is.na(MAF),
+    !is.na(LOWER_CI),
+    !is.na(UPPER_CI)
+  ) %>%
+  {
+    het_data <- .
+
+    somatic_upper_af_cutoff <- stats::quantile(
+      het_data$UPPER_CI,
+      probs = 0.025,
+      na.rm = TRUE,
+      names = FALSE
+    )
+
+    cutoff_summary <- het_data %>%
+      dplyr::summarise(
+        n_variants = dplyr::n_distinct(SUBMIT_NAME),
+        n_tissue_variant_rows = dplyr::n(),
+
+        maf_q025 = stats::quantile(MAF, 0.025, na.rm = TRUE),
+        maf_q975 = stats::quantile(MAF, 0.975, na.rm = TRUE),
+
+        lower_ci_q025 = stats::quantile(LOWER_CI, 0.025, na.rm = TRUE),
+        lower_ci_q975 = stats::quantile(LOWER_CI, 0.975, na.rm = TRUE),
+
+        upper_ci_q025 = stats::quantile(UPPER_CI, 0.025, na.rm = TRUE),
+        upper_ci_q975 = stats::quantile(UPPER_CI, 0.975, na.rm = TRUE),
+
+        somatic_upper_af_cutoff = somatic_upper_af_cutoff
+      )
+
+    cutoff_plot <- het_data %>%
+      tidyr::pivot_longer(
+        cols = c(MAF, LOWER_CI, UPPER_CI),
+        names_to = "metric",
+        values_to = "value"
+      ) %>%
+      ggplot2::ggplot(
+        ggplot2::aes(x = value)
+      ) +
+      ggplot2::geom_histogram(
+        bins = 100,
+        color = "black",
+        fill = "grey80"
+      ) +
+      ggplot2::facet_wrap(
+        ~metric,
+        scales = "free_y",
+        nrow = 1
+      ) +
+      ggplot2::geom_vline(
+        data = tibble::tibble(
+          metric = "UPPER_CI",
+          cutoff = somatic_upper_af_cutoff
+        ),
+        ggplot2::aes(xintercept = cutoff),
+        color = "red",
+        linetype = 2,
+        linewidth = 0.8
+      ) +
+      ggplot2::labs(
+        x = "Allele fraction",
+        y = "Count"
+      ) +
+      ggplot2::theme_bw()
+
+    list(
+      het_data = het_data,
+      cutoff = cutoff_summary,
+      plot = cutoff_plot
+    )
+  }
+
+het_cutoff_result$cutoff
+het_cutoff_result$plot
+```
+
+```{r}
+hom_cutoff_result <- no_occipital %>%
+  dplyr::filter(
+    SOURCE == "GermlineRefOrAltHomozygous",
+    (REF_COUNT + ALT_COUNT) > 30,
+    !is.na(MAF),
+    !is.na(LOWER_CI),
+    !is.na(UPPER_CI)
+  ) %>%
+  {
+    hom_data <- .
+
+    lower_ci_cutoff_75 <- stats::quantile(
+      hom_data$LOWER_CI,
+      probs = 0.75,
+      na.rm = TRUE,
+      names = FALSE
+    )
+
+    lower_ci_cutoff_95 <- stats::quantile(
+      hom_data$LOWER_CI,
+      probs = 0.95,
+      na.rm = TRUE,
+      names = FALSE
+    )
+
+    cutoff_summary <- hom_data %>%
+      dplyr::summarise(
+        n_variants = dplyr::n_distinct(SUBMIT_NAME),
+        n_tissue_variant_rows = dplyr::n(),
+        maf_q025 = stats::quantile(MAF, 0.025, na.rm = TRUE),
+        maf_q975 = stats::quantile(MAF, 0.975, na.rm = TRUE),
+        lower_ci_q025 = stats::quantile(LOWER_CI, 0.025, na.rm = TRUE),
+        lower_ci_q75 = lower_ci_cutoff_75,
+        lower_ci_q95 = lower_ci_cutoff_95,
+        lower_ci_q975 = stats::quantile(LOWER_CI, 0.975, na.rm = TRUE),
+        upper_ci_q025 = stats::quantile(UPPER_CI, 0.025, na.rm = TRUE),
+        upper_ci_q975 = stats::quantile(UPPER_CI, 0.975, na.rm = TRUE),
+        somatic_lower_af_cutoff = lower_ci_cutoff_95
+      )
+
+    plot_data <- hom_data %>%
+      tidyr::pivot_longer(
+        cols = c(MAF, LOWER_CI, UPPER_CI),
+        names_to = "metric",
+        values_to = "value"
+      )
+
+    plot75 <- plot_data %>%
+      ggplot2::ggplot(
+        ggplot2::aes(x = value)
+      ) +
+      ggplot2::geom_histogram(
+        bins = 100,
+        color = "black",
+        fill = "grey80"
+      ) +
+      ggplot2::facet_wrap(
+        ~metric,
+        scales = "free_y",
+        nrow = 1
+      ) +
+      ggplot2::geom_vline(
+        data = tibble::tibble(
+          metric = "LOWER_CI",
+          cutoff = lower_ci_cutoff_75
+        ),
+        ggplot2::aes(xintercept = cutoff),
+        color = "red",
+        linetype = 2,
+        linewidth = 0.8
+      ) +
+      ggplot2::labs(
+        title = "Homozygous-reference LOWER_CI 75th percentile",
+        subtitle = paste0(
+          "Cutoff = ",
+          format(lower_ci_cutoff_75, scientific = TRUE, digits = 4)
+        ),
+        x = "Allele fraction",
+        y = "Count"
+      ) +
+      ggplot2::theme_bw()
+
+    plot95 <- plot_data %>%
+      ggplot2::ggplot(
+        ggplot2::aes(x = value)
+      ) +
+      ggplot2::geom_histogram(
+        bins = 100,
+        color = "black",
+        fill = "grey80"
+      ) +
+      ggplot2::facet_wrap(
+        ~metric,
+        scales = "free_y",
+        nrow = 1
+      ) +
+      ggplot2::geom_vline(
+        data = tibble::tibble(
+          metric = "LOWER_CI",
+          cutoff = lower_ci_cutoff_95
+        ),
+        ggplot2::aes(xintercept = cutoff),
+        color = "red",
+        linetype = 2,
+        linewidth = 0.8
+      ) +
+      ggplot2::labs(
+        title = "Homozygous-reference LOWER_CI 95th percentile",
+        subtitle = paste0(
+          "Cutoff = ",
+          format(lower_ci_cutoff_95, scientific = TRUE, digits = 4)
+        ),
+        x = "Allele fraction",
+        y = "Count"
+      ) +
+      ggplot2::theme_bw()
+
+    list(
+      hom_data = hom_data,
+      cutoff = cutoff_summary,
+      plot75 = plot75,
+      plot95 = plot95
+    )
+  }
+
+hom_cutoff_result$cutoff %>%
+  dplyr::select(lower_ci_q75, lower_ci_q95)
+
+hom_cutoff_result$plot75
+```
+
+
+### mosaic_cand with lower bound 75th
+```{r}
+mosaic_cand_lowerAF_ci_75 <- no_occipital %>%
+  dplyr::filter(
+    !SOURCE %in% c(
+      "GermlineHeterozygous",
+      "GermlineRefOrAltHomozygous"
+    ),
+    !is.na(LOWER_CI),
+    !is.na(UPPER_CI),
+    !is.na(NORMAL_LOWER_CI),
+    LOWER_CI > hom_cutoff_result$cutoff$lower_ci_q75,
+    UPPER_CI < het_cutoff_result$cutoff$somatic_upper_af_cutoff,
+    NORMAL_LOWER_CI < hom_cutoff_result$cutoff$lower_ci_q75
+  )
+
+cat(
+  "number of rows:",
+  nrow(mosaic_cand_lowerAF_ci_75),
+  "\n"
+)
+
+cat(
+  "number of variants:",
+  dplyr::n_distinct(mosaic_cand_lowerAF_ci_75$SUBMIT_NAME),
+  "\n"
+)
+
+mosaic_cand_lowerAF_ci_75 %>%
+  dplyr::count(SOURCE, sort = TRUE)
+
+mosaic_cand_lowerAF_ci_75 %>%
+  dplyr::select(
+    ID,
+    CHROM,
+    POS,
+    REF,
+    ALT,
+    SOURCE,
+    SUBMIT_NAME,
+    REF_COUNT,
+    ALT_COUNT,
+    MAF,
+    LOWER_CI,
+    UPPER_CI,
+    NORMAL_REF_COUNT,
+    NORMAL_ALT_COUNT,
+    NORMAL_MAF,
+    NORMAL_LOWER_CI,
+    NORMAL_UPPER_CI
+  ) %>%
+  head()
+```
+
+
+```{r}
+#mosaic_added %>% write_tsv(., "flexible_mosaic_added_ampli.tsv")
+```
+
+```{r}
+mosaic_added <- read_tsv("../raw_data/flexible_mosaic_added_ampli.tsv")
+
+```
+
+### Lolli-plot
+
+```{r}
+make_variant_plot_list <- function(data,
+                                   flag_col = "mosaic_lowerAF_ci75",
+                                   lower_cutoff = hom_cutoff_result$cutoff$lower_ci_q75,
+                                   upper_cutoff = het_cutoff_result$cutoff$somatic_upper_af_cutoff) {
+
+  tissue_levels <- c(
+    "L-PF", "L-F", "L-P", "L-T",
+    "R-PF", "R-F", "R-P", "R-T",
+    "L-K", "R-K", "H"
+  )
+
+  upper_cutoff <- as.numeric(upper_cutoff)[1]
+
+  if (!is.null(lower_cutoff)) {
+    lower_cutoff <- as.numeric(lower_cutoff)[1]
+  }
+
+  plot_data <- data %>%
+    dplyr::mutate(
+      tissue = stringr::str_remove(ID, "^7614-"),
+      tissue = dplyr::recode(
+        tissue,
+        "L-PFC" = "L-PF",
+        "R-PFC" = "R-PF",
+        "L-Kid" = "L-K",
+        "R-Kid" = "R-K",
+        "Heart" = "H"
+      ),
+      tissue = factor(tissue, levels = tissue_levels)
+    ) %>%
+    dplyr::filter(!is.na(tissue))
+
+  selected_variants <- plot_data %>%
+    dplyr::filter(.data[[flag_col]] == 1L) %>%
+    dplyr::distinct(SUBMIT_NAME) %>%
+    dplyr::pull(SUBMIT_NAME)
+
+  plot_data <- plot_data %>%
+    dplyr::filter(SUBMIT_NAME %in% selected_variants) %>%
+    dplyr::mutate(
+      point_color = dplyr::if_else(
+        .data[[flag_col]] == 1L,
+        "Mosaic",
+        "Other"
+      )
+    )
+
+  y_break_values <- c(
+    0.01,
+    0.05,
+    0.1,
+    0.2,
+    upper_cutoff,
+    1
+  )
+
+  if (!is.null(lower_cutoff)) {
+    y_break_values <- c(
+      lower_cutoff,
+      y_break_values
+    )
+  }
+
+  y_break_values <- sort(unique(y_break_values))
+
+  y_break_labels <- vapply(
+    y_break_values,
+    function(x) {
+      if (!is.null(lower_cutoff) && isTRUE(all.equal(x, lower_cutoff))) {
+        format(x, scientific = TRUE, digits = 2)
+      } else {
+        format(x, scientific = FALSE, trim = TRUE)
+      }
+    },
+    character(1)
+  )
+
+  plot_list <- plot_data %>%
+    split(.$SUBMIT_NAME) %>%
+    purrr::imap(
+      function(temp, variant_name) {
+
+        variant_source <- unique(temp$SOURCE)
+
+        plot <- ggplot2::ggplot(
+          temp,
+          ggplot2::aes(
+            x = tissue,
+            y = sqrt(MAF)
+          )
+        ) +
+          ggplot2::geom_linerange(
+            ggplot2::aes(
+              ymin = sqrt(LOWER_CI),
+              ymax = sqrt(UPPER_CI)
+            ),
+            color = "grey75",
+            linewidth = 1.2
+          ) +
+          ggplot2::geom_point(
+            ggplot2::aes(color = point_color),
+            size = 3
+          ) +
+          ggplot2::geom_hline(
+            yintercept = sqrt(upper_cutoff),
+            linetype = 2,
+            color = "black",
+            linewidth = 0.8
+          ) +
+          ggplot2::scale_color_manual(
+            values = c(
+              "Mosaic" = "#D55E00",
+              "Other" = "#56B4E9"
+            ),
+            guide = "none"
+          ) +
+          ggplot2::scale_x_discrete(
+            drop = FALSE
+          ) +
+          ggplot2::scale_y_continuous(
+            breaks = sqrt(y_break_values),
+            labels = y_break_labels,
+            limits = c(0, 1)
+          ) +
+          ggplot2::labs(
+            title = variant_name,
+            subtitle = paste(
+              variant_source,
+              collapse = " | "
+            ),
+            x = NULL,
+            y = "sqrt(AF)"
+          ) +
+          ggplot2::theme_classic() +
+          ggplot2::theme(
+            plot.title = ggplot2::element_text(
+              face = "bold",
+              size = 13
+            ),
+            plot.subtitle = ggplot2::element_text(
+              size = 9
+            ),
+            axis.text.x = ggplot2::element_text(
+              face = "bold",
+              size = 11,
+              angle = 45,
+              hjust = 1
+            ),
+            axis.text.y = ggplot2::element_text(
+              size = 11
+            ),
+            axis.title.y = ggplot2::element_text(
+              size = 14
+            )
+          )
+
+        if (!is.null(lower_cutoff)) {
+          plot <- plot +
+            ggplot2::geom_hline(
+              yintercept = sqrt(lower_cutoff),
+              linetype = 2,
+              color = "black",
+              linewidth = 0.8
+            )
+        }
+
+        plot
+      }
+    )
+
+  plot_list
+}
+```
+
+```{r}
+plot_list_ci75 <- make_variant_plot_list(
+  data = mosaic_added,
+  flag_col = "mosaic_lowerAF_ci75",
+  lower_cutoff = hom_cutoff_result$cutoff$lower_ci_q75,
+  upper_cutoff = het_cutoff_result$cutoff$somatic_upper_af_cutoff
+)
+
+```
+
+### Pick representative variants from `plot_list_ci75`
+
+For candidate selection, a tissue is considered positive only when
+`mosaic_lowerAF_ci75 == 1`, matching the orange `Mosaic` points in the
+lolliplots. Raw non-zero MAF values that failed the CI75 rule are not counted
+as tissue presence.
+
+The four requested patterns are defined as:
+
+1. **Broad with peripheral organs:** positive in heart and both kidneys; rank
+   first by the number of positive tissues and then by the weakest positive
+   ALT count.
+2. **Bilateral brain only:** positive in the largest number of retained left
+   and right cortical regions, with no positive heart or kidney sample.
+3. **Left brain only:** positive in all four retained left cortical regions,
+   with no positive right-brain, heart, or kidney samples.
+4. **Focal brain only:** positive in exactly one brain region and no peripheral
+   sample.
+
+```{r}
+ci75_tissue_levels <- c(
+  "L-PF", "L-F", "L-P", "L-T",
+  "R-PF", "R-F", "R-P", "R-T",
+  "L-K", "R-K", "H"
+)
+
+ci75_left_brain <- c("L-PF", "L-F", "L-P", "L-T")
+ci75_right_brain <- c("R-PF", "R-F", "R-P", "R-T")
+ci75_brain <- c(ci75_left_brain, ci75_right_brain)
+ci75_peripheral <- c("L-K", "R-K", "H")
+
+# Restrict the summary to variants that actually occur in plot_list_ci75.
+candidate_summary_ci75 <- mosaic_added %>%
+  dplyr::mutate(
+    tissue = stringr::str_remove(ID, "^7614-"),
+    tissue = dplyr::recode(
+      tissue,
+      "L-PFC" = "L-PF",
+      "R-PFC" = "R-PF",
+      "L-Kid" = "L-K",
+      "R-Kid" = "R-K",
+      "Heart" = "H"
+    ),
+    ci75_present = mosaic_lowerAF_ci75 == 1L,
+    total_depth = REF_COUNT + ALT_COUNT
+  ) %>%
+  dplyr::filter(
+    SUBMIT_NAME %in% names(plot_list_ci75),
+    tissue %in% ci75_tissue_levels
+  ) %>%
+  dplyr::arrange(
+    SUBMIT_NAME,
+    match(tissue, ci75_tissue_levels)
+  ) %>%
+  dplyr::group_by(SUBMIT_NAME) %>%
+  dplyr::summarise(
+    source = paste(sort(unique(SOURCE)), collapse = " | "),
+    tier = as.integer(
+      stringr::str_extract(
+        dplyr::first(SUBMIT_NAME),
+        "(?<=-t)[123]$"
+      )
+    ),
+    n_present = sum(ci75_present),
+    n_left_brain = sum(ci75_present & tissue %in% ci75_left_brain),
+    n_right_brain = sum(ci75_present & tissue %in% ci75_right_brain),
+    n_brain = sum(ci75_present & tissue %in% ci75_brain),
+    n_peripheral = sum(ci75_present & tissue %in% ci75_peripheral),
+    heart_present = any(ci75_present & tissue == "H"),
+    left_kidney_present = any(ci75_present & tissue == "L-K"),
+    right_kidney_present = any(ci75_present & tissue == "R-K"),
+    present_tissues = paste(tissue[ci75_present], collapse = ", "),
+    min_present_alt_count = min(ALT_COUNT[ci75_present], na.rm = TRUE),
+    min_present_depth = min(total_depth[ci75_present], na.rm = TRUE),
+    median_present_maf = median(MAF[ci75_present], na.rm = TRUE),
+    min_present_lower_ci = min(LOWER_CI[ci75_present], na.rm = TRUE),
+    .groups = "drop"
+  )
+
+broad_peripheral_candidates_ci75 <- candidate_summary_ci75 %>%
+  dplyr::filter(
+    heart_present,
+    left_kidney_present,
+    right_kidney_present
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(n_present),
+    dplyr::desc(min_present_alt_count),
+    dplyr::desc(median_present_maf),
+    tier
+  )
+
+left_brain_only_candidates_ci75 <- candidate_summary_ci75 %>%
+  dplyr::filter(
+    n_left_brain == length(ci75_left_brain),
+    n_right_brain == 0,
+    n_peripheral == 0
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(min_present_alt_count),
+    dplyr::desc(median_present_maf),
+    tier
+  )
+
+bilateral_brain_only_candidates_ci75 <- candidate_summary_ci75 %>%
+  dplyr::filter(
+    n_left_brain > 0,
+    n_right_brain > 0,
+    n_peripheral == 0
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(n_brain),
+    dplyr::desc(min_present_alt_count),
+    dplyr::desc(median_present_maf),
+    tier
+  )
+
+focal_brain_only_candidates_ci75 <- candidate_summary_ci75 %>%
+  dplyr::filter(
+    n_brain == 1,
+    n_peripheral == 0
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(min_present_alt_count),
+    dplyr::desc(median_present_maf),
+    tier
+  )
+
+# Display several alternatives for each requested pattern.
+candidate_shortlist_ci75 <- dplyr::bind_rows(
+  broad_peripheral_candidates_ci75 %>%
+    dplyr::slice_head(n = 3) %>%
+    dplyr::mutate(pattern = "broad_with_heart_and_both_kidneys"),
+  bilateral_brain_only_candidates_ci75 %>%
+    dplyr::slice_head(n = 5) %>%
+    dplyr::mutate(pattern = "bilateral_brain_only"),
+  left_brain_only_candidates_ci75 %>%
+    dplyr::slice_head(n = 5) %>%
+    dplyr::mutate(pattern = "all_left_brain_only"),
+  focal_brain_only_candidates_ci75 %>%
+    dplyr::slice_head(n = 5) %>%
+    dplyr::mutate(pattern = "one_brain_region_only")
+) %>%
+  dplyr::group_by(pattern) %>%
+  dplyr::mutate(candidate_rank = dplyr::row_number()) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(
+    pattern,
+    candidate_rank,
+    SUBMIT_NAME,
+    tier,
+    source,
+    present_tissues,
+    n_present,
+    min_present_alt_count,
+    min_present_depth,
+    median_present_maf,
+    min_present_lower_ci
+  )
+
+candidate_shortlist_ci75 %>%
+  print(n = Inf)
+```
+
+`min_present_depth` is retained as a review column because the current
+`plot_list_ci75` construction does not impose an explicit tissue-depth filter.
+In the current data, all three variants positive in heart and both kidneys have
+at least one positive peripheral sample below 100 total reads, so a strict
+`min_present_depth >= 100` requirement would return no broad candidate.
+
+The first-ranked entry in each class is used below as the default set of
+four representatives. The named vector makes it easy to replace any choice
+with another row from `candidate_shortlist_ci75`.
+
+```{r}
+stopifnot(
+  nrow(broad_peripheral_candidates_ci75) > 0,
+  nrow(bilateral_brain_only_candidates_ci75) > 0,
+  nrow(left_brain_only_candidates_ci75) > 0,
+  nrow(focal_brain_only_candidates_ci75) > 0
+)
+
+representative_variants_ci75 <- c(
+  broad_with_heart_and_kidneys =
+    broad_peripheral_candidates_ci75$SUBMIT_NAME[[1]],
+  bilateral_brain_only =
+    bilateral_brain_only_candidates_ci75$SUBMIT_NAME[[1]],
+  left_brain_only =
+    left_brain_only_candidates_ci75$SUBMIT_NAME[[1]],
+  focal_brain_only =
+    focal_brain_only_candidates_ci75$SUBMIT_NAME[[1]]
+)
+
+representative_variants_ci75
+
+# These are the four ggplot objects ready for downstream arrangement/export.
+representative_plot_list_ci75 <- plot_list_ci75[
+  unname(representative_variants_ci75)
+]
+names(representative_plot_list_ci75) <- names(representative_variants_ci75)
+```
+
+### Additional validated tier-3 and PTA-origin examples
+
+Here, "validated" means that the variant is in `plot_list_ci75` and every
+CI75-positive tissue has at least 3 ALT reads. For the PTA-origin shortlist,
+`SOURCE` must contain `vcf_PTA`; variants that only have `bam_PTA` support but
+were discovered by another method are not classified as PTA-origin variants.
+
+```{r}
+tier3_validated_candidates_ci75 <- candidate_summary_ci75 %>%
+  dplyr::filter(
+    tier == 3,
+    min_present_alt_count >= 3
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(n_present),
+    dplyr::desc(min_present_alt_count),
+    dplyr::desc(median_present_maf)
+  )
+
+pta_validated_candidates_ci75 <- candidate_summary_ci75 %>%
+  dplyr::filter(
+    stringr::str_detect(source, "vcf_PTA"),
+    min_present_alt_count >= 3
+  ) %>%
+  dplyr::arrange(
+    dplyr::desc(n_present),
+    dplyr::desc(min_present_alt_count),
+    dplyr::desc(median_present_maf),
+    tier
+  )
+
+additional_candidate_shortlist_ci75 <- dplyr::bind_rows(
+  tier3_validated_candidates_ci75 %>%
+    dplyr::slice_head(n = 5) %>%
+    dplyr::mutate(candidate_type = "tier3_validated"),
+  pta_validated_candidates_ci75 %>%
+    dplyr::slice_head(n = 5) %>%
+    dplyr::mutate(candidate_type = "PTA_origin_validated")
+) %>%
+  dplyr::group_by(candidate_type) %>%
+  dplyr::mutate(candidate_rank = dplyr::row_number()) %>%
+  dplyr::ungroup() %>%
+  dplyr::select(
+    candidate_type,
+    candidate_rank,
+    SUBMIT_NAME,
+    tier,
+    source,
+    present_tissues,
+    n_present,
+    min_present_alt_count,
+    min_present_depth,
+    median_present_maf,
+    min_present_lower_ci
+  )
+
+additional_candidate_shortlist_ci75 %>%
+  print(n = Inf)
+```
+
+```{r}
+stopifnot(
+  nrow(tier3_validated_candidates_ci75) > 0,
+  nrow(pta_validated_candidates_ci75) > 0
+)
+
+additional_representative_variants_ci75 <- c(
+  tier3_validated =
+    tier3_validated_candidates_ci75$SUBMIT_NAME[[1]],
+  PTA_origin_validated =
+    pta_validated_candidates_ci75$SUBMIT_NAME[[1]]
+)
+
+additional_representative_variants_ci75
+
+additional_representative_plot_list_ci75 <- plot_list_ci75[
+  unname(additional_representative_variants_ci75)
+]
+names(additional_representative_plot_list_ci75) <- names(
+  additional_representative_variants_ci75
+)
+
+# Optional combined six-example plot list.
+extended_representative_variants_ci75 <- c(
+  representative_variants_ci75,
+  additional_representative_variants_ci75
+)
+
+extended_representative_plot_list_ci75 <- plot_list_ci75[
+  unname(extended_representative_variants_ci75)
+]
+names(extended_representative_plot_list_ci75) <- names(
+  extended_representative_variants_ci75
+)
+```
+
+### Figure 2a-style geoclones for the six representatives
+
+The repository implementation of Figure 2a
+(`make_AF_plot_variant()`, together with `make_colors()`, `make_hatches()`,
+and `make_boxes()`) draws fixed tissue rectangles, uses red opacity
+proportional to `sqrt(MAF)`, and optionally hatches samples below a depth
+threshold.  The reusable functions below retain those rules while adapting
+the layout to the 11 tissues in this experiment.  A tissue is colored only
+when `mosaic_lowerAF_ci75 == 1`; a measured CI75-negative tissue is white and
+a missing measurement is grey with an X.
+
+The default `normalized_sqrt` mode uses a shared VAF maximum of 0.15 so low
+fractions remain visible across all six panels.  Set
+`alpha_mode = "original_alpha"` to reproduce the original code's exact
+`sqrt(MAF)` red-on-white opacity.  Low-depth hatching is available through
+`show_low_depth_hatching = TRUE`, but is off in the final clean figure.
+Panel source labels are joined explicitly from
+`ampli_raw_annot.simple_repeat.tsv` through the `annot_simple` object.
+
+```{r fig2a-style-geoclone-functions}
+geoclone_tissue_geometry <- function() {
+  tibble::tribble(
+    ~tissue, ~display_group, ~hemisphere, ~xmin, ~xmax, ~ymin, ~ymax,
+    "L-PF", "Prefrontal", "Left",  0.00, 1.22, 4.65, 5.35,
+    "R-PF", "Prefrontal", "Right", 1.32, 2.54, 4.65, 5.35,
+    "L-F",  "Frontal",    "Left",  0.00, 1.22, 3.70, 4.40,
+    "R-F",  "Frontal",    "Right", 1.32, 2.54, 3.70, 4.40,
+    "L-P",  "Parietal",   "Left",  0.00, 1.22, 2.75, 3.45,
+    "R-P",  "Parietal",   "Right", 1.32, 2.54, 2.75, 3.45,
+    "L-T",  "Temporal",   "Left",  0.00, 1.22, 1.80, 2.50,
+    "R-T",  "Temporal",   "Right", 1.32, 2.54, 1.80, 2.50,
+    "H",    "Heart",      "Midline", 0.00, 2.54, 0.75, 1.45,
+    "L-K",  "Kidney",     "Left",  0.00, 1.22, -0.20, 0.50,
+    "R-K",  "Kidney",     "Right", 1.32, 2.54, -0.20, 0.50
+  )
+}
+
+normalize_geoclone_tissue <- function(id) {
+  tissue <- stringr::str_remove(id, "^7614-")
+  dplyr::recode(
+    tissue,
+    "L-PFC" = "L-PF",
+    "R-PFC" = "R-PF",
+    "L-Kid" = "L-K",
+    "R-Kid" = "R-K",
+    "Heart" = "H"
+  )
+}
+
+format_geoclone_variant <- function(variant) {
+  core <- stringr::str_remove(variant, "-t[123]$")
+  tier <- toupper(stringr::str_extract(variant, "t[123]$"))
+  pieces <- stringr::str_split(core, "_", simplify = TRUE)
+  paste0(
+    pieces[, 1], ":", pieces[, 2], " ",
+    pieces[, 3], ">", pieces[, 4], " (", tier, ")"
+  )
+}
+
+format_geoclone_source <- function(source, width = 34) {
+  breakable <- source %>%
+    stringr::str_remove("^tier[123]-") %>%
+    stringr::str_replace_all("-", "- ") %>%
+    stringr::str_replace_all("_", "_ ")
+
+  stringr::str_wrap(paste0("Source: ", breakable), width = width) %>%
+    stringr::str_replace_all("- ", "-") %>%
+    stringr::str_replace_all("_ ", "_")
+}
+
+prepare_fig2a_geoclone_data <- function(data,
+                                        variants,
+                                        source_annotation = data,
+                                        flag_col = "mosaic_lowerAF_ci75",
+                                        vaf_max = 0.15,
+                                        alpha_mode = c(
+                                          "normalized_sqrt",
+                                          "original_alpha"
+                                        )) {
+  alpha_mode <- match.arg(alpha_mode)
+  required_columns <- c(
+    "SUBMIT_NAME", "ID", "MAF", "REF_COUNT", "ALT_COUNT",
+    flag_col
+  )
+  missing_columns <- setdiff(required_columns, names(data))
+  if (length(missing_columns) > 0L) {
+    stop(
+      "Missing required columns: ",
+      paste(missing_columns, collapse = ", ")
+    )
+  }
+  missing_source_columns <- setdiff(
+    c("SUBMIT_NAME", "SOURCE"),
+    names(source_annotation)
+  )
+  if (length(missing_source_columns) > 0L) {
+    stop(
+      "Missing source-annotation columns: ",
+      paste(missing_source_columns, collapse = ", ")
+    )
+  }
+  if (length(variants) == 0L || anyDuplicated(unname(variants))) {
+    stop("`variants` must contain unique variant IDs.")
+  }
+  if (!is.numeric(vaf_max) || length(vaf_max) != 1L ||
+      !is.finite(vaf_max) || vaf_max <= 0) {
+    stop("`vaf_max` must be one positive finite number.")
+  }
+
+  geometry <- geoclone_tissue_geometry()
+  variant_key <- tibble::tibble(
+    variant_role = names(variants),
+    SUBMIT_NAME = unname(variants),
+    panel_order = seq_along(variants)
+  )
+  if (is.null(names(variants)) || any(names(variants) == "")) {
+    variant_key$variant_role <- paste0("variant_", variant_key$panel_order)
+  }
+
+  source_key <- source_annotation %>%
+    dplyr::filter(SUBMIT_NAME %in% variant_key$SUBMIT_NAME) %>%
+    dplyr::distinct(SUBMIT_NAME, SOURCE)
+
+  source_conflicts <- source_key %>%
+    dplyr::count(SUBMIT_NAME) %>%
+    dplyr::filter(n != 1L)
+  missing_source_variants <- setdiff(
+    variant_key$SUBMIT_NAME,
+    source_key$SUBMIT_NAME
+  )
+  if (nrow(source_conflicts) > 0L || length(missing_source_variants) > 0L ||
+      any(is.na(source_key$SOURCE))) {
+    stop(
+      "Expected one non-missing SOURCE per variant in source_annotation."
+    )
+  }
+
+  observed <- data %>%
+    dplyr::filter(SUBMIT_NAME %in% variant_key$SUBMIT_NAME) %>%
+    dplyr::mutate(tissue = normalize_geoclone_tissue(ID)) %>%
+    dplyr::filter(tissue %in% geometry$tissue) %>%
+    dplyr::select(
+      SUBMIT_NAME,
+      tissue,
+      ID,
+      MAF,
+      REF_COUNT,
+      ALT_COUNT,
+      dplyr::all_of(flag_col)
+    )
+
+  duplicate_rows <- observed %>%
+    dplyr::count(SUBMIT_NAME, tissue) %>%
+    dplyr::filter(n != 1L)
+  if (nrow(duplicate_rows) > 0L) {
+    stop("Expected exactly one source row per observed variant-tissue pair.")
+  }
+
+  expected <- tidyr::crossing(
+    SUBMIT_NAME = variant_key$SUBMIT_NAME,
+    tissue = geometry$tissue
+  )
+
+  result <- expected %>%
+    dplyr::left_join(observed, by = c("SUBMIT_NAME", "tissue")) %>%
+    dplyr::left_join(variant_key, by = "SUBMIT_NAME") %>%
+    dplyr::left_join(source_key, by = "SUBMIT_NAME") %>%
+    dplyr::left_join(geometry, by = "tissue") %>%
+    dplyr::mutate(
+      ci75_flag = .data[[flag_col]],
+      total_depth = REF_COUNT + ALT_COUNT,
+      missing_measurement = is.na(ID) | is.na(MAF) | is.na(ci75_flag),
+      ci75_present = !missing_measurement & ci75_flag == 1L,
+      plotted_vaf = dplyr::if_else(ci75_present, pmax(MAF, 0), 0),
+      fill_value = dplyr::case_when(
+        missing_measurement ~ NA_real_,
+        alpha_mode == "normalized_sqrt" ~
+          sqrt(pmin(plotted_vaf, vaf_max) / vaf_max),
+        TRUE ~ sqrt(pmin(plotted_vaf, 1))
+      ),
+      alpha_mode = alpha_mode
+    ) %>%
+    dplyr::arrange(panel_order, match(tissue, geometry$tissue))
+
+  stopifnot(
+    nrow(result) == length(variants) * nrow(geometry),
+    !anyDuplicated(result[c("SUBMIT_NAME", "tissue")]),
+    all(is.finite(result$xmin)),
+    all(is.finite(result$ymin)),
+    all(result$fill_value[!result$missing_measurement] >= 0),
+    all(result$fill_value[!result$missing_measurement] <= 1),
+    all(result$fill_value[!result$missing_measurement &
+                            !result$ci75_present] == 0)
+  )
+
+  result
+}
+
+# Generate clipped diagonal line segments inside low-depth tissue rectangles.
+# This keeps the optional hatch independent of ggpattern or other new packages.
+make_geoclone_hatch_segments <- function(plot_data,
+                                         depth_threshold = 100,
+                                         spacing = 0.16,
+                                         x_shift = 0.30) {
+  low_depth <- plot_data %>%
+    dplyr::filter(
+      !missing_measurement,
+      !is.na(total_depth),
+      total_depth < depth_threshold
+    )
+
+  if (nrow(low_depth) == 0L) {
+    return(tibble::tibble())
+  }
+
+  segments <- lapply(seq_len(nrow(low_depth)), function(i) {
+    row <- low_depth[i, ]
+    starts <- seq(row$xmin - x_shift, row$xmax, by = spacing)
+    x0 <- pmax(starts, row$xmin)
+    x1 <- pmin(starts + x_shift, row$xmax)
+    y0 <- row$ymin + (x0 - starts) / x_shift * (row$ymax - row$ymin)
+    y1 <- row$ymin + (x1 - starts) / x_shift * (row$ymax - row$ymin)
+
+    tibble::tibble(
+      panel_label = row$panel_label,
+      x = x0,
+      xend = x1,
+      y = y0,
+      yend = y1
+    ) %>%
+      dplyr::filter(xend > x, yend > y)
+  })
+
+  dplyr::bind_rows(segments)
+}
+
+plot_fig2a_geoclones <- function(plot_data,
+                                 vaf_max = 0.15,
+                                 alpha_mode = c(
+                                   "normalized_sqrt",
+                                   "original_alpha"
+                                 ),
+                                 ncol = 3,
+                                 show_low_depth_hatching = FALSE,
+                                 depth_threshold = 100) {
+  alpha_mode <- match.arg(alpha_mode)
+  role_labels <- c(
+    broad_with_heart_and_kidneys = "Broad + peripheral organs",
+    bilateral_brain_only = "Bilateral brain only",
+    left_brain_only = "Left-brain only",
+    focal_brain_only = "Focal brain only",
+    tier3_validated = "Validated tier 3",
+    PTA_origin_validated = "Validated PTA-origin"
+  )
+
+  panel_key <- plot_data %>%
+    dplyr::distinct(panel_order, variant_role, SUBMIT_NAME, SOURCE) %>%
+    dplyr::arrange(panel_order) %>%
+    dplyr::mutate(
+      role_label = dplyr::coalesce(
+        unname(role_labels[variant_role]),
+        stringr::str_replace_all(variant_role, "_", " ")
+      ),
+      panel_label = paste0(
+        role_label, "\n", format_geoclone_variant(SUBMIT_NAME),
+        "\n", format_geoclone_source(SOURCE)
+      )
+    )
+
+  plot_data <- plot_data %>%
+    dplyr::left_join(
+      panel_key %>% dplyr::select(SUBMIT_NAME, panel_label),
+      by = "SUBMIT_NAME"
+    ) %>%
+    dplyr::mutate(
+      panel_label = factor(
+        panel_label,
+        levels = panel_key$panel_label
+      )
+    )
+
+  annotations <- panel_key %>%
+    tidyr::crossing(
+      header = c("Left", "Right"),
+      x = c(0.61, 1.93)
+    ) %>%
+    # crossing() above creates four combinations; retain the paired two.
+    dplyr::filter(
+      (header == "Left" & x == 0.61) |
+        (header == "Right" & x == 1.93)
+    ) %>%
+    dplyr::mutate(
+      panel_label = factor(panel_label, levels = panel_key$panel_label)
+    )
+
+  bracket_data <- panel_key %>%
+    dplyr::transmute(
+      panel_label = factor(panel_label, levels = panel_key$panel_label),
+      x = 2.67,
+      xend = 2.67,
+      y = 1.80,
+      yend = 5.35
+    )
+
+  if (alpha_mode == "normalized_sqrt") {
+    legend_vaf <- unique(c(0, 0.01, 0.05, 0.10, vaf_max))
+    legend_breaks <- sqrt(pmin(legend_vaf, vaf_max) / vaf_max)
+    legend_title <- paste0("VAF (sqrt scale; capped at ", vaf_max, ")")
+  } else {
+    legend_vaf <- c(0, 0.01, 0.05, 0.10, 0.15, 0.50, 1)
+    legend_breaks <- sqrt(legend_vaf)
+    legend_title <- "VAF (original sqrt-alpha scale)"
+  }
+
+  figure <- ggplot2::ggplot(plot_data) +
+    ggplot2::geom_rect(
+      ggplot2::aes(
+        xmin = xmin,
+        xmax = xmax,
+        ymin = ymin,
+        ymax = ymax,
+        fill = fill_value
+      ),
+      color = "#171717",
+      linewidth = 0.45
+    ) +
+    ggplot2::geom_segment(
+      data = plot_data %>% dplyr::filter(missing_measurement),
+      ggplot2::aes(
+        x = xmin + 0.15,
+        xend = xmax - 0.15,
+        y = ymin + 0.12,
+        yend = ymax - 0.12
+      ),
+      inherit.aes = FALSE,
+      color = "#666666",
+      linewidth = 0.5
+    ) +
+    ggplot2::geom_segment(
+      data = plot_data %>% dplyr::filter(missing_measurement),
+      ggplot2::aes(
+        x = xmin + 0.15,
+        xend = xmax - 0.15,
+        y = ymax - 0.12,
+        yend = ymin + 0.12
+      ),
+      inherit.aes = FALSE,
+      color = "#666666",
+      linewidth = 0.5
+    ) +
+    ggplot2::geom_text(
+      data = annotations,
+      ggplot2::aes(x = x, y = 5.68, label = header),
+      inherit.aes = FALSE,
+      family = "Arial",
+      size = 7 / ggplot2::.pt,
+      fontface = "bold"
+    ) +
+    ggplot2::geom_segment(
+      data = bracket_data,
+      ggplot2::aes(x = x, xend = xend, y = y, yend = yend),
+      inherit.aes = FALSE,
+      linewidth = 0.45
+    ) +
+    ggplot2::geom_segment(
+      data = bracket_data,
+      ggplot2::aes(
+        x = x - 0.14,
+        xend = x,
+        y = y,
+        yend = y
+      ),
+      inherit.aes = FALSE,
+      linewidth = 0.45
+    ) +
+    ggplot2::geom_segment(
+      data = bracket_data,
+      ggplot2::aes(
+        x = x - 0.14,
+        xend = x,
+        y = yend,
+        yend = yend
+      ),
+      inherit.aes = FALSE,
+      linewidth = 0.45
+    ) +
+    ggplot2::geom_text(
+      data = bracket_data,
+      ggplot2::aes(x = x + 0.18, y = 3.58, label = "Cortex"),
+      inherit.aes = FALSE,
+      angle = 270,
+      family = "Arial",
+      size = 7 / ggplot2::.pt
+    ) +
+    ggplot2::facet_wrap(~panel_label, ncol = ncol) +
+    ggplot2::scale_fill_gradient(
+      name = legend_title,
+      low = "white",
+      high = "#E84A4A",
+      limits = c(0, 1),
+      breaks = legend_breaks,
+      labels = scales::label_number(accuracy = 0.01)(legend_vaf),
+      na.value = "#D9D9D9",
+      oob = scales::squish
+    ) +
+    ggplot2::scale_y_continuous(
+      breaks = c(5.00, 4.05, 3.10, 2.15, 1.10, 0.15),
+      labels = c(
+        "Prefrontal", "Frontal", "Parietal", "Temporal", "Heart", "Kidney"
+      )
+    ) +
+    ggplot2::coord_fixed(
+      ratio = 0.84,
+      xlim = c(-0.05, 2.98),
+      ylim = c(-0.38, 5.90),
+      clip = "off"
+    ) +
+    ggplot2::labs(
+      x = NULL,
+      y = NULL
+    ) +
+    ggplot2::guides(
+      fill = ggplot2::guide_colorbar(
+        title.position = "top",
+        title.hjust = 0.5,
+        barwidth = grid::unit(8.0, "cm"),
+        barheight = grid::unit(0.35, "cm")
+      )
+    ) +
+    ggplot2::theme_void(base_size = 7, base_family = "Arial") +
+    ggplot2::theme(
+      strip.text = ggplot2::element_text(
+        face = "bold",
+        size = 7,
+        lineheight = 1.05,
+        margin = ggplot2::margin(b = 4)
+      ),
+      axis.text.y = ggplot2::element_text(
+        color = "black",
+        face = "bold",
+        size = 7,
+        hjust = 1,
+        margin = ggplot2::margin(r = 5)
+      ),
+      legend.position = "bottom",
+      legend.title = ggplot2::element_text(size = 7),
+      legend.text = ggplot2::element_text(size = 7),
+      panel.spacing = grid::unit(1.1, "lines"),
+      plot.margin = ggplot2::margin(8, 12, 8, 8)
+    )
+
+  if (isTRUE(show_low_depth_hatching)) {
+    hatch_data <- make_geoclone_hatch_segments(
+      plot_data,
+      depth_threshold = depth_threshold
+    )
+    if (nrow(hatch_data) > 0L) {
+      hatch_data$panel_label <- factor(
+        hatch_data$panel_label,
+        levels = panel_key$panel_label
+      )
+      figure <- figure +
+        ggplot2::geom_segment(
+          data = hatch_data,
+          ggplot2::aes(x = x, xend = xend, y = y, yend = yend),
+          inherit.aes = FALSE,
+          color = "#303030",
+          linewidth = 0.22,
+          alpha = 0.65
+        )
+    }
+  }
+
+  figure
+}
+
+export_fig2a_geoclones <- function(figure,
+                                   plot_data,
+                                   output_dir,
+                                   stem = "fig5g_six_variant_geoclones",
+                                   width = 13.5,
+                                   height = 8.0,
+                                   dpi = 300) {
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  pdf_file <- file.path(output_dir, paste0(stem, ".pdf"))
+  png_file <- file.path(output_dir, paste0(stem, "_300dpi.png"))
+  tsv_file <- file.path(output_dir, paste0(stem, "_plot_data.tsv"))
+
+  ggplot2::ggsave(
+    filename = pdf_file,
+    plot = figure,
+    device = grDevices::cairo_pdf,
+    width = width,
+    height = height,
+    units = "in"
+  )
+
+  ragg::agg_png(
+    filename = png_file,
+    width = width,
+    height = height,
+    units = "in",
+    res = dpi,
+    background = "white"
+  )
+  print(figure)
+  grDevices::dev.off()
+
+  export_columns <- c(
+    "panel_order", "variant_role", "SUBMIT_NAME", "tissue",
+    "display_group", "hemisphere", "SOURCE", "ID", "MAF",
+    "REF_COUNT", "ALT_COUNT", "total_depth", "ci75_flag",
+    "ci75_present", "missing_measurement", "plotted_vaf", "fill_value",
+    "alpha_mode"
+  )
+  readr::write_tsv(
+    plot_data %>% dplyr::select(dplyr::all_of(export_columns)),
+    tsv_file,
+    na = "NA"
+  )
+
+  stopifnot(
+    file.exists(pdf_file),
+    file.info(pdf_file)$size > 0,
+    file.exists(png_file),
+    file.info(png_file)$size > 0,
+    file.exists(tsv_file),
+    length(readr::read_lines(tsv_file)) == nrow(plot_data) + 1L
+  )
+
+  list(pdf = pdf_file, png = png_file, tsv = tsv_file)
+}
+```
+
+```{r fig2a-style-geoclone-export, fig.width=13.5, fig.height=8}
+fig2a_geoclone_vaf_max <- 0.15
+fig2a_geoclone_alpha_mode <- "normalized_sqrt"
+
+fig2a_geoclone_data <- prepare_fig2a_geoclone_data(
+  data = mosaic_added,
+  variants = extended_representative_variants_ci75,
+  source_annotation = annot_simple,
+  flag_col = "mosaic_lowerAF_ci75",
+  vaf_max = fig2a_geoclone_vaf_max,
+  alpha_mode = fig2a_geoclone_alpha_mode
+)
+
+stopifnot(
+  nrow(fig2a_geoclone_data) == 66L,
+  dplyr::n_distinct(fig2a_geoclone_data$SUBMIT_NAME) == 6L,
+  all(table(fig2a_geoclone_data$SUBMIT_NAME) == 11L),
+  setequal(
+    fig2a_geoclone_data$SUBMIT_NAME,
+    unname(extended_representative_variants_ci75)
+  ),
+  all(
+    fig2a_geoclone_data$fill_value[
+      !fig2a_geoclone_data$missing_measurement &
+        !fig2a_geoclone_data$ci75_present
+    ] == 0
+  )
+)
+
+fig2a_geoclone_six_variant_plot <- plot_fig2a_geoclones(
+  plot_data = fig2a_geoclone_data,
+  vaf_max = fig2a_geoclone_vaf_max,
+  alpha_mode = fig2a_geoclone_alpha_mode,
+  ncol = 3,
+  show_low_depth_hatching = FALSE
+)
+
+geoclone_notebook_dir <- ".."
+
+fig2a_geoclone_output_files <- export_fig2a_geoclones(
+  figure = fig2a_geoclone_six_variant_plot,
+  plot_data = fig2a_geoclone_data,
+  output_dir = file.path(geoclone_notebook_dir, "output")
+)
+
+fig2a_geoclone_output_files
+fig2a_geoclone_six_variant_plot
+```
+
+### Four pattern variants in one row
+
+This compact version contains only the four tissue-distribution patterns and
+omits the validated tier-3 and PTA-origin examples.
+
+```{r fig2a-style-four-pattern-export, fig.width=14, fig.height=5.5}
+fig2a_geoclone_four_pattern_data <- prepare_fig2a_geoclone_data(
+  data = mosaic_added,
+  variants = representative_variants_ci75,
+  source_annotation = annot_simple,
+  flag_col = "mosaic_lowerAF_ci75",
+  vaf_max = fig2a_geoclone_vaf_max,
+  alpha_mode = fig2a_geoclone_alpha_mode
+)
+
+stopifnot(
+  nrow(fig2a_geoclone_four_pattern_data) == 44L,
+  dplyr::n_distinct(
+    fig2a_geoclone_four_pattern_data$SUBMIT_NAME
+  ) == 4L,
+  all(table(fig2a_geoclone_four_pattern_data$SUBMIT_NAME) == 11L),
+  setequal(
+    fig2a_geoclone_four_pattern_data$SUBMIT_NAME,
+    unname(representative_variants_ci75)
+  ),
+  !any(
+    fig2a_geoclone_four_pattern_data$variant_role %in%
+      c("tier3_validated", "PTA_origin_validated")
+  )
+)
+
+fig2a_geoclone_four_pattern_plot <- plot_fig2a_geoclones(
+  plot_data = fig2a_geoclone_four_pattern_data,
+  vaf_max = fig2a_geoclone_vaf_max,
+  alpha_mode = fig2a_geoclone_alpha_mode,
+  ncol = 4,
+  show_low_depth_hatching = FALSE
+)
+
+fig2a_geoclone_four_pattern_output_files <- export_fig2a_geoclones(
+  figure = fig2a_geoclone_four_pattern_plot,
+  plot_data = fig2a_geoclone_four_pattern_data,
+  output_dir = file.path(geoclone_notebook_dir, "output"),
+  stem = "fig5g_four_pattern_geoclones_one_row",
+  width = 14,
+  height = 5.5,
+  dpi = 300
+)
+
+fig2a_geoclone_four_pattern_output_files
+fig2a_geoclone_four_pattern_plot
+```
+
+
+```{r}
+# Save a named list of ggplot objects into a multi-page PDF
+save_plot_list_pdf <- function(plot_list, pdf_file, width = 5, height = 6) {
+  grDevices::pdf(pdf_file, width = width, height = height)
+  on.exit(grDevices::dev.off(), add = TRUE)
+
+  for (plot_name in names(plot_list)) {
+    print(plot_list[[plot_name]])
+  }
+}
+
+# This optional export uses the submission output directory.
+# The existing RUN_LEGACY_VOLUMES_EXPORT switch is retained for compatibility.
+if (identical(Sys.getenv("RUN_LEGACY_VOLUMES_EXPORT"), "1")) {
+  save_plot_list_pdf(
+    plot_list = plot_list_ci75,
+    pdf_file = "../output/plot_list_ci75_all_variants.pdf"
+  )
+} else {
+  message("Skipping opt-in all-variant PDF export.")
+}
+
+```

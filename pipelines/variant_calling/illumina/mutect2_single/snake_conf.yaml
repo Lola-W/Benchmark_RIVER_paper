@@ -1,0 +1,20 @@
+input_files: ./samples.tsv
+out_dir: ./results
+scratch_dir: ./results/scratch
+
+gatk4: ../../software/gatk-4.6.2.0/gatk-package-4.6.2.0-local.jar
+java: java
+pon_vcf: ../../resources/1000g_pon.hg38.vcf.gz
+
+# INPUT 
+n_intervals : 107
+
+
+# REFERENCE FILES
+bed_file: ../../resources/Homo_sapiens_assembly38.bed
+ref_fasta: ../../resources/GRCh38_full_analysis_set_plus_decoy_hla.fa
+
+gnomad: ../../resources/af-only-gnomad.hg38.vcf.gz
+ucsc_rpmsk: ../../resources/rmsk.txt
+repeat_masker: ../../resources/hg38.repeatMasker.bed
+segdup: ../../resources/hg38.segdup.bed

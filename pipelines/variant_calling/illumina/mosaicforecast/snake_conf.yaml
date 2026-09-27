@@ -1,0 +1,10 @@
+input_files: ./samples.tsv
+out_dir: ./results
+scratch_dir: ./results/scratch
+
+read_length : 150
+ref_fasta: ../../resources/GRCh38_full_analysis_set_plus_decoy_hla.fa
+mosaicforecast: ../../software/MosaicForecast
+umap: ../../resources/hg38_24.bw
+
+model_trained: ../../software/MosaicForecast/models_trained/200xRFmodel_addRMSK_Refine.rds

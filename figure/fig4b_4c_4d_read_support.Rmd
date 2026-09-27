@@ -1,0 +1,666 @@
+---
+title: "benchmarking_figures"
+author: "dcha"
+date: "2026-08-24"
+output: html_document
+---
+
+### Finalized TSVs
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+source("../R/nature_biotech_ggplot.R")
+
+overlap_colours <- c(
+  "private" = "#619CFF",
+  "overlap_1" = "#00BA38",
+  "overlap_ge_2" = "#F8766D"
+)
+
+support_colours <- c(
+  "1" = "#F8766D",
+  "2" = "#A3A500",
+  "3" = "#00BF7D",
+  "4" = "#00B0F6",
+  "5" = "#E76BF3"
+)
+
+raw <- read_tsv("../raw_data/raw_duplex_pileup_newPTA_altge1.tsv")
+nogerm <- read_tsv("../raw_data/no_germline.no_blacklist.duplex_pileup_newPTA_altge1.tsv")
+filt <- read_tsv("../raw_data/no_unrelated.no_germline.no_blacklist.duplex_pileup_newPTA_altge1_unrel_lowci.tsv")
+
+```
+
+
+### Fig. 4a
+```{r fig4a, fig.width=7.2, fig.height=4.5, dpi=450}
+library(dplyr)
+library(stringr)
+library(ggplot2)
+
+call_cols <- c(
+  "call_Illumina",
+  "call_ppmSeq_multiread",
+  "call_ppmSeq_singleton_HC",
+  "call_UDSeq_multiread",
+  "call_UDSeq_singleton",
+  "call_NanoSeq_multiread",
+  "call_NanoSeq_singleton",
+  "call_HiDEFseq_double_stranded",
+  "call_HiDEFseq_single_stranded",
+  "call_PTA_singleton"
+)
+
+exist_cols <- c(
+  "is_existing_lower_ci_0001_ILLUMINA",
+  "is_existing_lower_ci_0001_DUPLEX_PPMSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_UDSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_NANOSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ",
+  "existing_any_PTA1_16"
+)
+
+exist_cols_full <- c(
+  "is_existing_lower_ci_0001_ILLUMINA",
+  "is_existing_lower_ci_0001_DUPLEX_PPMSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_UDSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_NANOSEQ",
+  "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ",
+  "existing_any_PTA1_16"
+)
+
+get_self_exist_cols <- function(callset) {
+  if (callset == "call_Illumina")
+    return("is_existing_lower_ci_0001_ILLUMINA")
+
+  if (callset %in% c("call_ppmSeq_multiread", "call_ppmSeq_singleton_HC"))
+    return("is_existing_lower_ci_0001_DUPLEX_PPMSEQ")
+
+  if (callset %in% c("call_UDSeq_multiread", "call_UDSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_UDSEQ")
+
+  if (callset %in% c("call_NanoSeq_multiread", "call_NanoSeq_singleton"))
+    return("is_existing_lower_ci_0001_DUPLEX_NANOSEQ")
+
+  if (callset %in% c("call_HiDEFseq_double_stranded", "call_HiDEFseq_single_stranded"))
+    return("is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ")
+
+  if (callset == "call_PTA_singleton")
+    return("existing_any_PTA1_16")
+
+  character(0)
+}
+
+call_levels <- stringr::str_replace(call_cols, "^call_", "")
+
+call_to_exist_prop <- lapply(call_cols, function(cc) {
+  df_call <- filt %>%
+    dplyr::filter(.data[[cc]] == 1)
+
+  if (nrow(df_call) == 0)
+    return(NULL)
+
+  self_cols <- get_self_exist_cols(cc)
+  other_exist_cols <- setdiff(exist_cols, self_cols)
+
+  other_n <- rowSums(
+    df_call[, other_exist_cols, drop = FALSE] == 1,
+    na.rm = TRUE
+  )
+
+  tibble(
+    callset = stringr::str_replace(cc, "^call_", ""),
+    overlap_class = dplyr::case_when(
+      other_n == 0 ~ "private",
+      other_n == 1 ~ "overlap_1",
+      other_n >= 2 ~ "overlap_ge_2"
+    )
+  )
+}) %>%
+  dplyr::bind_rows() %>%
+  dplyr::count(callset, overlap_class, name = "n") %>%
+  dplyr::group_by(callset) %>%
+  dplyr::mutate(prop = n / sum(n)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    callset = factor(callset, levels = rev(call_levels)),
+    overlap_class = factor(
+      overlap_class,
+      levels = c("overlap_ge_2", "overlap_1", "private")
+    )
+  )
+
+lab_df <- call_to_exist_prop %>%
+  dplyr::mutate(overlap_class = as.character(overlap_class)) %>%
+  dplyr::group_by(callset) %>%
+  dplyr::arrange(
+    match(overlap_class, c("private", "overlap_1", "overlap_ge_2")),
+    .by_group = TRUE
+  ) %>%
+  dplyr::mutate(
+    y_center = cumsum(prop) - prop / 2,
+    y_edge = cumsum(prop),
+    y_line = y_edge + 0.020,
+    y_label = y_edge + 0.035,
+    label = ifelse(
+      prop >= 0.042,
+      scales::percent(prop, accuracy = 0.1),
+      scales::percent(prop, accuracy = 0.01)
+    ),
+    hjust = ifelse(
+      as.character(callset) == "PTA_singleton" &
+        overlap_class == "overlap_ge_2",
+      -1.5,
+      0
+    )
+  ) %>%
+  dplyr::ungroup()
+
+ggplot(
+  call_to_exist_prop,
+  aes(x = callset, y = prop, fill = overlap_class)
+) +
+  geom_col(width = 0.75) +
+  geom_text(
+    data = lab_df %>% dplyr::filter(prop >= 0.042),
+    aes(x = callset, y = y_center, label = label),
+    inherit.aes = FALSE,
+    size = 2.5,
+    family = "Arial"
+  ) +
+  geom_segment(
+    data = lab_df %>% dplyr::filter(prop < 0.042, prop > 0),
+    aes(x = callset, xend = callset, y = y_edge, yend = y_line),
+    inherit.aes = FALSE,
+    linewidth = 0.3
+  ) +
+  geom_text(
+    data = lab_df %>% dplyr::filter(prop < 0.042, prop > 0),
+    aes(x = callset, y = y_label, label = label, hjust = hjust),
+    inherit.aes = FALSE,
+    size = 2.4,
+    family = "Arial"
+  ) +
+  coord_flip(clip = "off") +
+  scale_y_continuous(
+    labels = scales::percent_format(accuracy = 1),
+    expand = expansion(mult = c(0, 0.10))
+  ) +
+  scale_x_discrete(labels = normalize_seq_method) +
+  scale_fill_manual(
+    values = overlap_colours,
+    breaks = c("overlap_ge_2", "overlap_1", "private"),
+    labels = c("2+ other platforms", "1 other platform", "Private"),
+    name = NULL
+  ) +
+  theme_classic() +
+  labs(
+    x = NULL,
+    y = "Proportion (%)",
+    fill = NULL
+  ) +
+  theme_nbt(base_size = 7)
+```
+
+### Fig. 4b
+
+```{r fig4b, fig.width=7.2, fig.height=3.8, dpi=450}
+exist_cols <- exist_cols_full
+
+
+
+support_cols <- setdiff(exist_cols,
+          c("existing_any_PTA1_16_singleton",
+            "existing_any_PTA1_16_multiple"))
+
+
+filt2 <- filt %>%
+  mutate(
+    n_support = rowSums(
+      dplyr::select(., dplyr::all_of(support_cols)) == 1,
+      na.rm = TRUE
+    )
+  ) %>%
+  dplyr::filter(n_support >= 1, n_support <= 5) %>%
+  mutate(n_support = factor(n_support, levels = 1:5)) #%>%
+  #filter(n_support<5)
+
+med_tbl <- filt2 %>%
+  group_by(n_support) %>%
+  summarize(med = median(ILLUMINA_MAF, na.rm = TRUE), .groups = "drop")
+
+ggplot(filt2, aes(x = n_support, y = ILLUMINA_MAF, fill = n_support)) +
+  geom_violin(trim = TRUE, scale = "width", alpha = 0.5, color = NA) +
+  geom_boxplot(width = 0.18, outlier.shape = NA, alpha = 0.95) +
+  coord_flip() +
+  theme_classic(base_size = 14) +
+  theme(legend.position = "none") +
+  labs(
+    x = "# Platforms supporting variant",
+    y = "Illumina MAF"
+  ) +
+  scale_fill_manual(values = support_colours, drop = FALSE) +
+   scale_y_continuous(
+    limits = c(0, 0.3),
+    breaks = seq(0, 0.3, by = 0.05),
+    expand = expansion(mult = c(0.02, 0.18))
+  ) +
+  theme_nbt(base_size = 7)
+
+stat_tbl <- filt2 %>%
+  group_by(n_support) %>%
+  summarize(
+    mean_maf   = mean(ILLUMINA_MAF, na.rm = TRUE),
+    median_maf = median(ILLUMINA_MAF, na.rm = TRUE),
+    .groups = "drop"
+  )
+stat_tbl
+```
+
+### Fig. 4c
+
+```{r fig4c, fig.width=12, fig.height=5.2, dpi=450}
+library(dplyr)
+library(stringr)
+library(UpSetR)
+
+support_cols <- exist_cols_full
+
+
+# ---- Build matrix for UpSetR (missing cols -> 0) ----
+make_mat_strata <- function(df, cols) {
+  out <- lapply(cols, function(x) {
+    if (x %in% colnames(df)) as.integer(df[[x]] %in% 1) else rep(0L, nrow(df))
+  })
+  mat <- as.data.frame(out, check.names = FALSE)
+  colnames(mat) <- cols
+  rownames(mat) <- NULL
+  mat
+}
+
+# ---- Exact BAM labels from support_cols ----
+platform_label_map <- c(
+  "is_existing_lower_ci_0001_ILLUMINA" = "Illumina",
+  "is_existing_lower_ci_0001_DUPLEX_PPMSEQ" = "ppmSeq",
+  "is_existing_lower_ci_0001_DUPLEX_UDSEQ" = "UDSeq",
+  "is_existing_lower_ci_0001_DUPLEX_NANOSEQ" = "NanoSeq",
+  "is_existing_lower_ci_0001_DUPLEX_HIDEFSEQ" = "HiDEF-seq",
+  "existing_any_PTA1_16" = "PTA"
+)
+
+# ---- BAM evidence matrix ----
+
+big_tsv <- filt
+
+mat_bam <- make_mat_strata(big_tsv, support_cols)
+
+# rename columns to exact platform labels
+colnames(mat_bam) <- unname(platform_label_map[colnames(mat_bam)])
+
+# enforce your order (if you want)
+#bam_order <- c("ILLUMINA","PPMSEQ","UDSEQ","NANOSEQ","HIDEFSEQ")
+#colnames(mat_bam) <- factor(colnames(mat_bam), levels = bam_order) %>% as.character()
+#mat_bam <- mat_bam[, bam_order, drop = FALSE]
+mat_bam_filt <- mat_bam %>%
+  mutate(.k = rowSums(dplyr::select(., everything()) > 0)) %>%  # number of supporting platforms per row
+  #filter(.k >= 2) %>%
+  dplyr::select(-.k)
+
+# ---- Plot ----
+set_order <- names(sort(colSums(mat_bam_filt), decreasing = TRUE))
+
+old_theme <- ggplot2::theme_set(ggplot2::theme_get() + theme_nbt(base_size = 7))
+
+fig4c <- upset(
+  mat_bam_filt,
+  sets = set_order,
+  nsets = ncol(mat_bam_filt),
+  nintersects = 200,
+  keep.order = TRUE,
+  order.by = "freq",
+  mainbar.y.label = "Intersection size",
+  sets.x.label = "Set size",
+  matrix.color = NBT_METHOD_BASE_COLOURS[["Reference"]],
+  main.bar.color = NBT_METHOD_BASE_COLOURS[["Reference"]],
+  sets.bar.color = NBT_METHOD_BASE_COLOURS[["Reference"]],
+  text.scale = c(7/8.3, 1, 7/8.3, 1, 1, 1)
+)
+
+main_break_lower <- 22000
+main_break_upper <- 58000
+main_break_spacer <- 500
+
+map_main_broken_axis <- function(value) {
+  ifelse(
+    value >= main_break_upper,
+    main_break_lower + main_break_spacer + value - main_break_upper,
+    value
+  )
+}
+
+main_break_tick_raw <- c(0, 5000, 10000, 15000, 20000, 60000)
+main_break_tick_display <- map_main_broken_axis(main_break_tick_raw)
+
+main_bar_data <- UpSetR:::Counter(
+  fig4c$New_data,
+  length(fig4c$Set_names),
+  fig4c$first.col,
+  fig4c$Set_names,
+  200,
+  NBT_METHOD_BASE_COLOURS[["Reference"]],
+  "freq",
+  "degree",
+  NULL,
+  NULL,
+  TRUE
+)
+
+if (any(
+  main_bar_data$freq > main_break_lower &
+    main_bar_data$freq < main_break_upper
+)) {
+  stop("Compressed Fig. 4c axis is invalid: an intersection lies inside the omitted range.")
+}
+
+main_high_values <- main_bar_data$freq[main_bar_data$freq >= main_break_upper]
+if (length(main_high_values) != 1L || main_high_values[[1L]] != 61891) {
+  stop("Compressed Fig. 4c axis expected 61,891 as its only high intersection.")
+}
+
+main_bar_data <- main_bar_data %>%
+  dplyr::mutate(display_freq = map_main_broken_axis(freq))
+
+main_bar_break_marks <- main_bar_data %>%
+  dplyr::filter(freq >= main_break_upper) %>%
+  dplyr::select(x) %>%
+  tidyr::crossing(mark = c(1, 2)) %>%
+  dplyr::mutate(
+    x_start = x - 0.28,
+    x_end = x + 0.28,
+    y_start = ifelse(
+      mark == 1,
+      main_break_lower - 100,
+      main_break_lower + main_break_spacer - 100
+    ),
+    y_end = y_start + 200
+  )
+
+main_axis_break_marks <- data.frame(
+  x_start = c(0, 0.10),
+  x_end = c(0.16, 0.26),
+  y_start = c(
+    main_break_lower - 100,
+    main_break_lower + main_break_spacer - 100
+  )
+)
+main_axis_break_marks$y_end <- main_axis_break_marks$y_start + 200
+
+main_y_max <- max(main_bar_data$display_freq) * 1.1
+
+main_bar_plot_broken <- ggplot2::ggplot(
+  main_bar_data,
+  ggplot2::aes(x = x, y = display_freq)
+) +
+  ggplot2::geom_col(
+    width = 0.6,
+    fill = NBT_METHOD_BASE_COLOURS[["Reference"]]
+  ) +
+  ggplot2::geom_vline(xintercept = 0, colour = "black") +
+  ggplot2::geom_hline(yintercept = 0, colour = "black") +
+  ggplot2::annotate(
+    "rect",
+    xmin = -Inf,
+    xmax = Inf,
+    ymin = main_break_lower,
+    ymax = main_break_lower + main_break_spacer,
+    fill = "white",
+    colour = NA
+  ) +
+  ggplot2::geom_segment(
+    data = main_axis_break_marks,
+    ggplot2::aes(
+      x = x_start,
+      xend = x_end,
+      y = y_start,
+      yend = y_end
+    ),
+    inherit.aes = FALSE,
+    colour = "black",
+    linewidth = 0.35
+  ) +
+  ggplot2::geom_segment(
+    data = main_bar_break_marks,
+    ggplot2::aes(
+      x = x_start,
+      xend = x_end,
+      y = y_start,
+      yend = y_end
+    ),
+    inherit.aes = FALSE,
+    colour = "white",
+    linewidth = 0.35
+  ) +
+  ggplot2::geom_text(
+    ggplot2::aes(label = freq),
+    family = "Arial",
+    size = 2.2,
+    vjust = -1,
+    angle = 0,
+    colour = NBT_METHOD_BASE_COLOURS[["Reference"]]
+  ) +
+  ggplot2::scale_x_continuous(
+    limits = c(0, nrow(main_bar_data) + 1),
+    expand = c(0, 0),
+    breaks = NULL
+  ) +
+  ggplot2::scale_y_continuous(
+    limits = c(0, main_y_max),
+    breaks = main_break_tick_display,
+    labels = scales::comma(main_break_tick_raw, accuracy = 1),
+    expand = c(0, 0)
+  ) +
+  ggplot2::labs(x = NULL, y = "Intersection size", title = NULL) +
+  ggplot2::coord_cartesian(clip = "off") +
+  ggplot2::theme(
+    text = ggplot2::element_text(family = "Arial", size = 7),
+    panel.background = ggplot2::element_rect(fill = "white", colour = NA),
+    panel.grid = ggplot2::element_blank(),
+    panel.border = ggplot2::element_blank(),
+    plot.margin = grid::unit(c(0.5, 0.5, 0.5, 0.5), "lines"),
+    axis.title.y = ggplot2::element_text(
+      family = "Arial",
+      size = 7,
+      vjust = -0.8
+    ),
+    axis.text.y = ggplot2::element_text(
+      family = "Arial",
+      size = 7,
+      vjust = 0.3
+    ),
+    axis.text.x = ggplot2::element_blank(),
+    axis.ticks.x = ggplot2::element_blank()
+  )
+
+fig4c$Main_bar <- ggplot2::ggplotGrob(main_bar_plot_broken)
+
+size_break_lower <- 35000
+size_break_upper <- 80000
+size_break_spacer <- 1000
+
+map_size_broken_axis <- function(value) {
+  ifelse(
+    value >= size_break_upper,
+    size_break_lower + size_break_spacer + value - size_break_upper,
+    value
+  )
+}
+
+size_break_tick_raw <- c(0, 20000, 80000)
+size_break_tick_display <- map_size_broken_axis(size_break_tick_raw)
+
+size_data <- data.frame(
+  set_index = seq_along(fig4c$Set_names),
+  raw_size = as.numeric(colSums(
+    fig4c$New_data[, fig4c$Set_names, drop = FALSE]
+  ))
+)
+
+if (any(
+  size_data$raw_size > size_break_lower &
+    size_data$raw_size < size_break_upper
+)) {
+  stop("Compressed Fig. 4c set-size axis is invalid: a set lies inside the omitted range.")
+}
+
+size_high_values <- size_data$raw_size[size_data$raw_size >= size_break_upper]
+if (length(size_high_values) != 1L || size_high_values[[1L]] != 83682) {
+  stop("Compressed Fig. 4c set-size axis expected 83,682 as its only high set.")
+}
+
+size_data <- size_data %>%
+  dplyr::mutate(display_size = map_size_broken_axis(raw_size))
+
+size_bar_break_marks <- size_data %>%
+  dplyr::filter(raw_size >= size_break_upper) %>%
+  dplyr::select(set_index) %>%
+  tidyr::crossing(mark = c(1, 2)) %>%
+  dplyr::mutate(
+    set_start = set_index - 0.18,
+    set_end = set_index + 0.18,
+    size_start = ifelse(
+      mark == 1,
+      size_break_lower - 200,
+      size_break_lower + size_break_spacer - 200
+    ),
+    size_end = size_start + 400
+  )
+
+size_axis_break_marks <- data.frame(
+  set_start = c(0.5, 0.58),
+  set_end = c(0.62, 0.70),
+  size_start = c(
+    size_break_lower - 200,
+    size_break_lower + size_break_spacer - 200
+  )
+)
+size_axis_break_marks$size_end <- size_axis_break_marks$size_start + 400
+
+size_axis_max <- max(size_data$display_size) * 1.1
+
+size_plot_broken <- ggplot2::ggplot(
+  size_data,
+  ggplot2::aes(x = set_index, y = display_size)
+) +
+  ggplot2::geom_col(
+    width = 0.4,
+    fill = NBT_METHOD_BASE_COLOURS[["Reference"]],
+    colour = NBT_METHOD_BASE_COLOURS[["Reference"]]
+  ) +
+  ggplot2::annotate(
+    "rect",
+    xmin = -Inf,
+    xmax = Inf,
+    ymin = size_break_lower,
+    ymax = size_break_lower + size_break_spacer,
+    fill = "white",
+    colour = NA
+  ) +
+  ggplot2::geom_segment(
+    data = size_axis_break_marks,
+    ggplot2::aes(
+      x = set_start,
+      xend = set_end,
+      y = size_start,
+      yend = size_end
+    ),
+    inherit.aes = FALSE,
+    colour = "black",
+    linewidth = 0.35
+  ) +
+  ggplot2::geom_segment(
+    data = size_bar_break_marks,
+    ggplot2::aes(
+      x = set_start,
+      xend = set_end,
+      y = size_start,
+      yend = size_end
+    ),
+    inherit.aes = FALSE,
+    colour = "white",
+    linewidth = 0.35
+  ) +
+  ggplot2::scale_x_continuous(
+    limits = c(0.5, nrow(size_data) + 0.5),
+    breaks = NULL,
+    expand = c(0, 0)
+  ) +
+  ggplot2::scale_y_reverse(
+    limits = c(size_axis_max, 0),
+    breaks = size_break_tick_display,
+    labels = scales::comma(size_break_tick_raw, accuracy = 1),
+    expand = c(0, 0)
+  ) +
+  ggplot2::labs(x = NULL, y = "Set size") +
+  ggplot2::coord_flip(clip = "off") +
+  ggplot2::theme(
+    text = ggplot2::element_text(family = "Arial", size = 7),
+    panel.background = ggplot2::element_rect(fill = "white", colour = NA),
+    plot.margin = grid::unit(c(-0.11, 0.3, 0.5, 0.5), "lines"),
+    axis.title.x = ggplot2::element_text(family = "Arial", size = 7),
+    axis.text.x = ggplot2::element_text(
+      family = "Arial",
+      size = 7,
+      vjust = 1,
+      hjust = 0.5
+    ),
+    axis.line = ggplot2::element_line(colour = "gray0"),
+    axis.line.y = ggplot2::element_blank(),
+    axis.line.x = ggplot2::element_line(colour = "gray0", linewidth = 0.3),
+    axis.text.y = ggplot2::element_blank(),
+    axis.ticks.y = ggplot2::element_blank(),
+    panel.grid.minor = ggplot2::element_blank(),
+    panel.grid.major = ggplot2::element_blank()
+  )
+
+fig4c$Sizes <- ggplot2::ggplotGrob(size_plot_broken)
+
+set_text_grobs_arial <- function(g) {
+  if (inherits(g, "text")) {
+    g$gp$fontfamily <- "Arial"
+  }
+  if (!is.null(g$children)) {
+    for (i in seq_along(g$children)) {
+      g$children[[i]] <- Recall(g$children[[i]])
+    }
+  }
+  if (!is.null(g$grobs)) {
+    for (i in seq_along(g$grobs)) {
+      g$grobs[[i]] <- Recall(g$grobs[[i]])
+    }
+  }
+  g
+}
+
+fig4c$Main_bar <- set_text_grobs_arial(fig4c$Main_bar)
+
+fig4c$Matrix <- gtable::gtable_add_cols(
+  fig4c$Matrix,
+  grid::unit(2, "mm"),
+  pos = 0
+)
+fig4c$Main_bar <- gtable::gtable_add_cols(
+  fig4c$Main_bar,
+  grid::unit(2, "mm"),
+  pos = 0
+)
+
+ggplot2::theme_set(old_theme)
+fig4c
+
+#big_tsv %>% dplyr::select(call_cols_full_depth) %>% colSums(.)
+
+#big_tsv %>% dplyr::select(support_cols) %>% dplyr::select(-existing_any_PTA1_16) %>% colSums(.)
+```

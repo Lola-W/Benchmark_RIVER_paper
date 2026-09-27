@@ -1,0 +1,155 @@
+configfile: "snake_conf.yaml"
+
+import sys, os
+import gzip
+import pandas as pd
+import numpy as np
+
+#the bam files need to come from the same directory
+def get_inputs():
+    samples = {}
+    with open(config["input_files"], "r") as f:
+        for line in f:
+            if line.startswith("#"):
+                continue
+            sample, bam_file, vcf_file = line.rstrip().split("\t")
+            samples[sample] = [bam_file, vcf_file]
+    return samples
+
+
+def create_input_bed(vcf_files, output_file):
+    wf = open(str(output_file), "w") 
+    for file in vcf_files:
+        print(file)
+        sample_name = file.split("/")[-1].split("_")[0]
+        with gzip.open(file, "rt") as f:
+            for line in f:
+               if line.startswith("#"):
+                   continue
+               line = line.rstrip().split("\t")
+               chrom = line[0]
+               pos = line[1]
+               ref = line[3]
+               alt = line[4]
+               wf.write("\t".join([chrom, str(int(pos)-1), pos, ref, alt, sample_name]) + "\n")
+    wf.close()
+
+
+
+OUT_DIR = config["out_dir"]
+SCRATCH_DIR = config["scratch_dir"]
+SAMPLES= get_inputs()
+
+REF_FASTA = config["ref_fasta"]
+MOSAICFORECAST = config["mosaicforecast"]
+READ_LENGTH = config["read_length"]
+
+PHASE_SCRIPT = MOSAICFORECAST + "/Phase.py"
+FEATURE_EXTRACTION_SCRIPT = MOSAICFORECAST + "/ReadLevel_Features_extraction.py"
+PREDICTION_SCRIPT = MOSAICFORECAST + "/Prediction.R"
+MODEL_TRAINED = config["model_trained"]
+
+UMAP = config["umap"]
+
+
+
+
+#create directories
+'''
+dirs = [SCRATCH_DIR + "/input_beds/", OUT_DIR + "/features/"]
+for dir in dirs:
+    if not os.path.exists(dir):
+        os.makedirs(dir) 
+
+for sample in SAMPLES:
+    dir = SCRATCH_DIR + "/phasing/" + sample
+    if not os.path.exists(dir):
+        os.makedirs(dir) 
+'''    
+
+localrules: all, create_positions_bed, create_softlinks_for_bams, genotype_prediction
+
+rule all:
+    input:
+        expand([OUT_DIR + "/phasing/{sample}/all.phasing", 
+                OUT_DIR + "/prediction_results/{sample}_prediction.txt"],
+                sample=SAMPLES.keys()),
+
+
+
+rule create_softlinks_for_bams:
+    input:
+        bam = lambda wildcards: SAMPLES[wildcards.sample][0],
+        bai = lambda wildcards: SAMPLES[wildcards.sample][0] + ".bai",
+    output:
+        bam = OUT_DIR + "/softlinks_dir/{sample}.bam",
+        bai = OUT_DIR + "/softlinks_dir/{sample}.bam.bai",
+    shell:
+         "ln -s {input.bam} {output.bam};"
+         "ln -s {input.bai} {output.bai}"
+
+        
+rule create_positions_bed:
+    input:
+        vcf = lambda wildcards: SAMPLES[wildcards.sample][1],
+    output:
+        bed = OUT_DIR + "/input_beds/{sample}.bed"
+    shell:
+        """ zcat {input.vcf} | grep -v "#" | grep PASS | """
+        """ awk -v OFS="\\t" '{{print $1,$2-1,$2,$4,$5,"{wildcards.sample}"}}' """
+        """    > {output.bed} """
+        
+
+rule run_phasing:
+    input:
+        bed = OUT_DIR + "/input_beds/{sample}.bed",
+        bam = OUT_DIR + "/softlinks_dir/{sample}.bam",
+        bai = OUT_DIR + "/softlinks_dir/{sample}.bam.bai",
+    output:
+        OUT_DIR + "/phasing/{sample}/all.phasing"
+    params:
+        bam_dir = OUT_DIR + "/softlinks_dir",
+        #cluster = "-l nodes=2:ppn=8 -l walltime=48:00:00",
+        output_dir = OUT_DIR + "/phasing/{sample}",
+        n_jobs_parallel = 10,
+        min_dp = 20,
+    shell:
+        "python {PHASE_SCRIPT}"
+        "    {params.bam_dir}"
+        "    {params.output_dir}"
+        "    {REF_FASTA}"
+        "    {input.bed}"
+        "    {params.min_dp} "
+        "    {UMAP}"
+        "    {params.n_jobs_parallel}"
+        
+
+rule extract_features:
+    input:
+        bed = OUT_DIR + "/input_beds/{sample}.bed",
+        bam = OUT_DIR + "/softlinks_dir/{sample}.bam",
+        bai = OUT_DIR + "/softlinks_dir/{sample}.bam.bai",
+    output:
+        OUT_DIR + "/features/{sample}_features.txt"  
+    params:
+        bam_dir = OUT_DIR + "/softlinks_dir",
+        n_jobs_parallel = 10,
+        #cluster = "-q hotel -M 'xiy010@ucsd.edu' -l nodes=2:ppn=8 -l walltime=48:00:00",
+    shell:
+        "python {FEATURE_EXTRACTION_SCRIPT}"
+        "    {input.bed}"
+        "    {output}"
+        "    {params.bam_dir}"
+        "    {REF_FASTA}"
+        "    {UMAP}"
+        "    {READ_LENGTH} "
+        "    {params.n_jobs_parallel}"
+    
+rule genotype_prediction:
+   input:
+        features = OUT_DIR + "/features/{sample}_features.txt",
+   output:
+        OUT_DIR + "/prediction_results/{sample}_prediction.txt",
+   shell:
+        "Rscript {PREDICTION_SCRIPT} {input.features} {MODEL_TRAINED} {output}"
+

@@ -1,0 +1,26 @@
+path_from_variant_calling	role	workflow	index	status
+inputs/7614_illumina_brain_somatic.bam	Brain / somatic sample	Illumina callers	inputs/7614_illumina_brain_somatic.bam.bai	Not included
+inputs/7614_illumina_matchedNormal.bam	Matched normal	Paired Mutect2/Strelka2; DeepSomatic	inputs/7614_illumina_matchedNormal.bam.bai	Not included
+inputs/7614-Cortex-L-T_Hpy_D.bam	NanoSeq cortex	DupCaller NanoSeq	inputs/7614-Cortex-L-T_Hpy_D.bam.bai	Not included
+inputs/7614-Liver_Hpy_D.bam	NanoSeq matched liver control	DupCaller NanoSeq	inputs/7614-Liver_Hpy_D.bam.bai	Not included
+inputs/7614-Cortex-L-T_D.bam	UDSeq cortex	DupCaller UDSeq	inputs/7614-Cortex-L-T_D.bam.bai	Not included
+inputs/7614-Kidney-L_D.bam	UDSeq matched kidney control	DupCaller UDSeq	inputs/7614-Kidney-L_D.bam.bai	Not included
+inputs/m84137_250211_013035_s1.hifi_reads.bam	PacBio CCS reads	HiDEF-seq	PacBio read index as required by upstream workflow	Not included
+inputs/m84137_250211_013035_s1.bam	PacBio germline alignment	HiDEF-seq	inputs/m84137_250211_013035_s1.bam.bai	Not included
+pta/input/bulk.bam	Matched bulk control	PTA SCAN2	pta/input/bulk.bam.bai	Not included
+pta/input/7614_single_neuron_1.sc.bam	Single neuron 1	PTA SCAN2	pta/input/7614_single_neuron_1.sc.bam.bai	Not included
+pta/input/7614_single_neuron_2.sc.bam	Single neuron 2	PTA SCAN2	pta/input/7614_single_neuron_2.sc.bam.bai	Not included
+pta/input/7614_single_neuron_3.sc.bam	Single neuron 3	PTA SCAN2	pta/input/7614_single_neuron_3.sc.bam.bai	Not included
+pta/input/7614_single_neuron_4.sc.bam	Single neuron 4	PTA SCAN2	pta/input/7614_single_neuron_4.sc.bam.bai	Not included
+pta/input/7614_single_neuron_5.sc.bam	Single neuron 5	PTA SCAN2	pta/input/7614_single_neuron_5.sc.bam.bai	Not included
+pta/input/7614_single_neuron_6.sc.bam	Single neuron 6	PTA SCAN2	pta/input/7614_single_neuron_6.sc.bam.bai	Not included
+pta/input/7614_single_neuron_7.sc.bam	Single neuron 7	PTA SCAN2	pta/input/7614_single_neuron_7.sc.bam.bai	Not included
+pta/input/7614_single_neuron_8.sc.bam	Single neuron 8	PTA SCAN2	pta/input/7614_single_neuron_8.sc.bam.bai	Not included
+pta/input/7614_single_neuron_9.sc.bam	Single neuron 9	PTA SCAN2	pta/input/7614_single_neuron_9.sc.bam.bai	Not included
+pta/input/7614_single_neuron_10.sc.bam	Single neuron 10	PTA SCAN2	pta/input/7614_single_neuron_10.sc.bam.bai	Not included
+pta/input/7614_single_neuron_11.sc.bam	Single neuron 11	PTA SCAN2	pta/input/7614_single_neuron_11.sc.bam.bai	Not included
+pta/input/7614_single_neuron_12.sc.bam	Single neuron 12	PTA SCAN2	pta/input/7614_single_neuron_12.sc.bam.bai	Not included
+pta/input/7614_single_neuron_13.sc.bam	Single neuron 13	PTA SCAN2	pta/input/7614_single_neuron_13.sc.bam.bai	Not included
+pta/input/7614_single_neuron_14.sc.bam	Single neuron 14	PTA SCAN2	pta/input/7614_single_neuron_14.sc.bam.bai	Not included
+pta/input/7614_single_neuron_15.sc.bam	Single neuron 15	PTA SCAN2	pta/input/7614_single_neuron_15.sc.bam.bai	Not included
+pta/input/7614_single_neuron_16.sc.bam	Single neuron 16	PTA SCAN2	pta/input/7614_single_neuron_16.sc.bam.bai	Not included

@@ -1,0 +1,2 @@
+#sample	bam	vcf
+7614_300x	../../inputs/7614_illumina_brain_somatic.bam	../mutect2_single/results/scratch/passed_single_mode/7614_300x_somatic.vcf.gz

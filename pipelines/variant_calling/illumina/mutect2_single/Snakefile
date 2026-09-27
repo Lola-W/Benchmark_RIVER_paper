@@ -1,0 +1,290 @@
+configfile: "snake_conf.yaml"
+
+import os
+from snakemake.exceptions import WorkflowError
+
+
+def read_samples():
+    f = open(config['input_files'], "r")
+    normals = {}
+    tumors = {}
+    for line in f:
+       if line.startswith("#"):
+          continue
+       sample_id, label, bam_path = line.rstrip().split("\t")
+       if label == "normal":
+           normals[sample_id] = bam_path
+       if label == "tumor":
+           tumors[sample_id] = bam_path
+    f.close()
+    return normals, tumors
+
+
+NORMALS, TUMORS = read_samples()
+print(NORMALS)
+print(TUMORS)
+
+
+OUT_DIR = config["out_dir"]
+
+# Choose PON target (external vs pipeline-built)
+EXTERNAL_PON = bool(config.get("pon_vcf"))
+PON_TARGET   = config["pon_vcf"] if EXTERNAL_PON else os.path.join(OUT_DIR, "pon/mutect2_pon.vcf.gz")
+PON_INDEX    = PON_TARGET + ".tbi"
+
+# Optional: hard fail early if external PON is requested but missing
+if EXTERNAL_PON:
+    if not (os.path.exists(PON_TARGET) and os.path.exists(PON_INDEX)):
+        raise WorkflowError(f"External PON not found (or missing index): {PON_TARGET} / {PON_INDEX}")
+
+N_INTERVALS = config['n_intervals']
+INTERVALS = ["%04d" % x for x in range(N_INTERVALS)]
+
+
+OUT_DIR = config['out_dir']
+SCRATCH_DIR = config['scratch_dir']
+
+REF_FASTA = config['ref_fasta']
+BED_FILE = config['bed_file']
+
+JAVA = config["java"]
+GATK4 = config['gatk4']
+GNOMAD = config['gnomad']
+
+NODE_MEM = 7
+THREADS = 8
+
+def calc_mem(threads):
+    return lambda wc: threads * NODE_MEM
+
+rule all:
+    input:
+        #expand(SCRATCH_DIR + "/single_mode/{tumor}_somatic.vcf.gz", tumor=TUMORS),
+        #expand(SCRATCH_DIR + "/single_mode/{tumor}_somatic.vcf.gz.tbi", tumor=TUMORS)
+        expand(SCRATCH_DIR + "/passed_single_mode/{tumor}_somatic.vcf.gz", tumor=TUMORS)
+
+# 0000-scattered.interval_list for GATK4.6.2.0 but 0000-scattered.interval for earlier GATK4 versions
+rule get_intervals:
+    input:
+        BED_FILE
+    output:
+        expand(SCRATCH_DIR + "/intervals/{interval}-scattered.interval_list", interval=INTERVALS)
+    params:
+        out_dir = SCRATCH_DIR + "/intervals/"
+    threads: 8
+    resources:
+        mem_gb=calc_mem(6)
+    shell:
+        "{JAVA} -Xmx{resources.mem_gb}G -jar {GATK4} SplitIntervals "
+        "    -R {REF_FASTA} "
+        "    -L {input} "
+        "    --scatter-count {N_INTERVALS} "
+        "    -O {params.out_dir}"
+
+rule convert_intervals_to_bed:
+    input:
+        SCRATCH_DIR + "/intervals/{interval}-scattered.interval_list"
+    output:
+        bed=SCRATCH_DIR + "/intervals_bed/{interval}.bed.gz",
+        tbi=SCRATCH_DIR + "/intervals_bed/{interval}.bed.gz.tbi"
+    threads: 2
+    resources:
+        mem_gb=calc_mem(2)
+    shell:
+        r"""
+        grep -v '@' {input} | awk 'BEGIN {{OFS="\t"}} {{print $1,$2-1,$3}}' | bgzip > {output.bed};
+        """
+        "tabix -p bed {output.bed};"
+
+if not EXTERNAL_PON:
+    rule run_mutect2_normal_only:
+        input:
+            normal=lambda wildcards: NORMALS[wildcards.normal],
+            intervals=SCRATCH_DIR + "/intervals/{interval}-scattered.interval_list"
+        output:
+            SCRATCH_DIR + "/normal_intervals_pon/{normal}/{interval}_for_pon.vcf.gz"
+        benchmark:
+            OUT_DIR + "/benchmarks/normal_intervals_pon/{normal}/{interval}.txt"
+        threads: 6
+        resources:
+            mem_gb=calc_mem(4)
+        shell:
+            "{JAVA} -Xmx{resources.mem_gb}G -jar {GATK4} Mutect2 "
+            "    -R {REF_FASTA} "
+            "    -I {input.normal} "
+            "    -tumor {wildcards.normal} "
+            "    --germline-resource {GNOMAD} "
+            "    -L {input.intervals} "
+            "    --native-pair-hmm-threads {threads} "
+            "    -O {output}"
+
+    NODE_MEM = 7
+
+    rule generate_normal_only_list:
+        input:
+            lambda wc: expand(SCRATCH_DIR + "/normal_intervals_pon/{normal}/{interval}_for_pon.vcf.gz",
+                            normal=wc.normal, interval=INTERVALS)
+        output:
+            SCRATCH_DIR + "/normal_only_list/{normal}_vcf.list"
+        threads: 1
+        resources:
+            mem_gb=calc_mem(1)
+        run:
+            with open(output[0], "w") as f:
+                for path in input:
+                    f.write(path + "\n")
+
+
+    rule gather_normal_only_vcfs:
+        input:
+            SCRATCH_DIR + "/normal_only_list/{normal}_vcf.list"
+        output:
+            vcf=SCRATCH_DIR + "/normals_for_pon/{normal}_for_pon.vcf.gz",
+            tbi=SCRATCH_DIR + "/normals_for_pon/{normal}_for_pon.vcf.gz.tbi"
+        benchmark:
+            OUT_DIR + "/benchmarks/normals_for_pon/{normal}.txt"
+        threads: 8
+        resources:
+            mem_gb=calc_mem(6)
+        shell:
+            "{JAVA} -Xmx{resources.mem_gb}G -jar {GATK4} GatherVcfs "
+            "    -I {input} "
+            "    -O {output.vcf}; tabix -p vcf {output.vcf}"
+
+    rule generate_pon_list:
+        input:
+            expand(SCRATCH_DIR + "/normals_for_pon/{normal}_for_pon.vcf.gz", normal=list(NORMALS.keys()))
+        output:
+            SCRATCH_DIR + "/pon_list/normals_for_pon_vcf.list"
+        threads: 1
+        resources:
+            mem_gb=7
+        run:
+            with open(output[0], "w") as f:
+                for path in input:
+                    f.write(path + "\n")
+
+    rule generate_PON:
+        input:
+            SCRATCH_DIR + "/pon_list/normals_for_pon_vcf.list"
+        output:
+            OUT_DIR + "/pon/mutect2_pon.vcf.gz"
+        benchmark:
+            OUT_DIR + "/benchmarks/pon/mutect2_PON.txt"
+        threads: 4
+        resources:
+            mem_gb=calc_mem(4)
+        shell:
+            "{JAVA} -Xmx{resources.mem_gb}G -jar {GATK4} CreateSomaticPanelOfNormals "
+            "    -vcfs {input} "
+            "    -O {output}"
+
+rule run_mutect2_single_mode:
+    input:
+        tumor=lambda wildcards: TUMORS[wildcards.tumor],
+        pon=PON_TARGET,
+        pon_tbi=PON_INDEX,   # expects the provided .tbi; nothing is re-indexed
+        intervals=SCRATCH_DIR + "/intervals/{interval}-scattered.interval_list"
+    output:
+        vcf = SCRATCH_DIR + "/single_mode_intervals/{tumor}/{interval}_somatic.vcf.gz",
+        stats = SCRATCH_DIR + "/single_mode_intervals/{tumor}/{interval}_somatic.vcf.gz.stats"
+    benchmark:
+        OUT_DIR + "/benchmarks/single_mode_intervals/{tumor}/{interval}.txt"
+    threads: 6
+    resources:
+        mem_gb=calc_mem(4)
+    shell:
+        "{JAVA} -Xmx{resources.mem_gb}G -jar {GATK4} Mutect2 "
+        "    -I {input.tumor} "
+        "    -tumor {wildcards.tumor} "
+        "    --panel-of-normals {input.pon} "
+        "    -R {REF_FASTA} "
+        "    --af-of-alleles-not-in-resource 0.00003125 "
+        "    --germline-resource {GNOMAD} "
+        "    --native-pair-hmm-threads {threads} "
+        "    -L {input.intervals} "
+        "    -O {output.vcf}"
+
+
+rule generate_single_mode_list:
+    input:
+        lambda wc: expand(SCRATCH_DIR + "/single_mode_intervals/{tumor}/{interval}_somatic.vcf.gz",
+                           tumor=wc.tumor, interval=INTERVALS)
+    output:
+        SCRATCH_DIR + "/single_mode_vcf_list/{tumor}_vcf.list"
+    threads: 1
+    resources:
+        mem_gb=7
+    run:
+        with open(output[0], "w") as f:
+            for path in input:
+                f.write(path + "\n")
+
+
+rule gather_single_mode_vcfs:
+    input:
+        SCRATCH_DIR + "/single_mode_vcf_list/{tumor}_vcf.list"
+    output: 
+        vcf=SCRATCH_DIR + "/single_mode/{tumor}_somatic.vcf.gz",
+        tbi=SCRATCH_DIR + "/single_mode/{tumor}_somatic.vcf.gz.tbi"
+    benchmark:
+        OUT_DIR + "/benchmarks/single_mode/{tumor}.txt"
+    threads: 8
+    resources:
+        mem_gb=calc_mem(6)
+    shell:
+        "{JAVA} -Xmx{resources.mem_gb}G -jar {GATK4} GatherVcfs "
+        "    -I {input} "
+        "    -O {output.vcf}; tabix -p vcf {output.vcf}"
+        
+rule merge_single_mode_stats:
+    input:
+        # one .stats per interval, written by Mutect2 alongside each shard VCF
+        lambda wc: expand(
+            SCRATCH_DIR + "/single_mode_intervals/{tumor}/{interval}_somatic.vcf.gz.stats",
+            tumor=wc.tumor, interval=INTERVALS
+        )
+    output:
+        SCRATCH_DIR + "/single_mode/{tumor}_somatic.vcf.gz.stats"
+    threads: 1
+    resources:
+        mem_gb = calc_mem(1)
+    params:
+        # Turn the input list into repeated "-stats file" flags for GATK
+        stats_flags = lambda wc: " ".join(
+            f"-stats {SCRATCH_DIR}/single_mode_intervals/{wc.tumor}/{i}_somatic.vcf.gz.stats"
+            for i in INTERVALS
+        )
+    shell:
+        "{JAVA} -Xmx{resources.mem_gb}G -jar {GATK4} MergeMutectStats "
+        "  {params.stats_flags} "
+        "  -O {output}"
+
+rule filter_single_mode:
+    input:
+        vcf  = SCRATCH_DIR + "/single_mode/{tumor}_somatic.vcf.gz",
+        tbi  = SCRATCH_DIR + "/single_mode/{tumor}_somatic.vcf.gz.tbi",
+        stats= SCRATCH_DIR + "/single_mode/{tumor}_somatic.vcf.gz.stats"
+    output:
+        SCRATCH_DIR + "/filtered_single_mode/{tumor}_somatic.vcf.gz"
+    threads: 8
+    resources:
+        mem_gb=calc_mem(6)
+    shell:
+        "{JAVA} -Xmx{resources.mem_gb}G -jar {GATK4} FilterMutectCalls "
+        "    -R {REF_FASTA} "
+        "    -V {input.vcf} "
+        "    --stats {input.stats} "
+        "    -O {output}"
+
+
+rule extract_pass:
+    input:
+        SCRATCH_DIR + "/filtered_single_mode/{tumor}_somatic.vcf.gz"
+    output:
+        SCRATCH_DIR + "/passed_single_mode/{tumor}_somatic.vcf.gz"
+    threads: 1
+    resources:
+        mem_gb=7
+    shell:
+        "zcat {input} | grep -v '^#' | grep 'PASS' | gzip > {output}"

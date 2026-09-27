@@ -1,0 +1,142 @@
+configfile: "snake_conf.yaml"
+
+import os
+import math
+import csv
+from dataclasses import dataclass
+
+# -----------------------
+# Sample loader
+# -----------------------
+def read_samples(tsv):
+    S, SEX = {}, {}
+    with open(tsv) as f:
+        for ln in f:
+            if ln.startswith("#") or not ln.strip():
+                continue
+            s, sex, bam = ln.strip().split("\t")
+            S[s] = bam
+            SEX[s] = sex
+    return S, SEX
+
+SAMPLES, SEX = read_samples(config["samples_tsv"])
+
+# -----------------------
+# Chunk machinery
+# -----------------------
+@dataclass
+class Contig:
+    name: str
+    length: int
+
+def read_fai(path):
+    contigs = []
+    with open(path) as f:
+        for ln in f:
+            c, L, *_ = ln.split("\t")
+            if c.startswith("chr") and (c[3:].isdigit() or c in ["chrX", "chrY"]):
+                contigs.append(Contig(c, int(L)))
+    return contigs
+
+def pieces_needed(L, M):
+    return (L + M - 1) // M
+
+def allocate_k_minimax(contigs, total_chunks):
+    lo, hi = 1, max(c.length for c in contigs)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if sum(pieces_needed(c.length, mid) for c in contigs) <= total_chunks:
+            hi = mid
+        else:
+            lo = mid + 1
+    M = lo
+    k = {c.name: pieces_needed(c.length, M) for c in contigs}
+    while sum(k.values()) < total_chunks:
+        worst = max(contigs, key=lambda c: ( (c.length + k[c.name]-1)//k[c.name], c.length))
+        k[worst.name] += 1
+    return k
+
+def make_chunks(contig, k):
+    base = contig.length // k
+    rem = contig.length % k
+    out, s = [], 1
+    for i in range(1, k+1):
+        sz = base + (1 if i <= rem else 0)
+        e = s + sz - 1
+        cid = f"{contig.name}_{i:03d}_{s:09d}-{e:09d}"
+        out.append((contig.name, s, e, cid))
+        s = e + 1
+    return out
+
+# build chunks once
+CONTIGS = read_fai(config["ref_fasta"]+".fai")
+KMAP = allocate_k_minimax(CONTIGS, config["total_chunks"])
+
+CHUNKS = []
+for c in CONTIGS:
+    CHUNKS.extend(make_chunks(c, KMAP[c.name]))
+
+# -----------------------
+# Shortcuts
+# -----------------------
+JAVA = config["java"]
+MH_JAR = config["mosaichunter_jar"]
+REF = config["ref_fasta"]
+DBSNP = config["dbsnp_vcf"]
+REPEAT = config["repeat_bed"]
+ERROR_PRONE = config["error_prone_bed"]
+INDEL = config["indel_bed"]
+OUT = config["out_dir"]
+
+THREADS = config["threads_per_job"]
+MEM_GB = config["mem_gb_thread"] * THREADS
+
+# -----------------------
+# All
+# -----------------------
+rule all:
+    input:
+        expand(
+            os.path.join(OUT, "{sample}", "{chunk_id}", "final.passed.tsv"),
+            sample=SAMPLES.keys(),
+            chunk_id=[c[3] for c in CHUNKS]
+        )
+
+# -----------------------
+# MosaicHunter per chunk
+# -----------------------
+rule mosaichunter_chunk:
+    threads: THREADS
+    input:
+        bam=lambda wc: SAMPLES[wc.sample]
+    output:
+        os.path.join(OUT, "{sample}", "{chunk_id}", "final.passed.tsv")
+    params:
+        info=lambda wc: next(c for c in CHUNKS if c[3] == wc.chunk_id),
+        sex=lambda wc: SEX[wc.sample],
+        outdir=lambda wc: os.path.join(OUT, wc.sample, wc.chunk_id)
+    log:
+        os.path.join(OUT, "{sample}", "{chunk_id}", "mosaichunter.log")
+    shell:
+        r"""
+        set -euo pipefail
+        mkdir -p "{params.outdir}"
+
+        "{JAVA}" -Xmx{MEM_GB}G \
+          -jar "{MH_JAR}" \
+          -C props/{params.info[0]}.properties \
+          -P input_file={input.bam} \
+          -P reference_file={REF} \
+          -P mosaic_filter.mode=single \
+          -P mosaic_filter.sex={params.sex} \
+          -P mosaic_filter.dbsnp_file={DBSNP} \
+          -P repetitive_region_filter.bed_file={REPEAT} \
+          -P common_site_filter.bed_file={ERROR_PRONE} \
+          -P indel_region_filter.bed_file={INDEL} \
+          -P chr={params.info[0]} \
+          -P start_position={params.info[1]} \
+          -P end_position={params.info[2]} \
+          -P output_dir={params.outdir} \
+          > "{log}" 2>&1
+        """
+
