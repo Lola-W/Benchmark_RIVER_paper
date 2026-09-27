@@ -1,8 +1,7 @@
 # Benchmark_RIVER_paper
 
 Code and processed input tables for the mosaicism benchmark study, organized
-into analysis pipelines and figure scripts following
-[Adult brain somatic mosaicism](https://github.com/shishenyxx/Adult_brain_somatic_mosaicism).
+into analysis pipelines and figure scripts
 
 - [Figure scripts](figure/README.md): seven scripts for the listed manuscript panels.
 - [Variant calling](pipelines/variant_calling/README.md): caller workflows, configurations, and alignment placeholders; ppmSeq calling is maintained separately.
