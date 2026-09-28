@@ -3,7 +3,7 @@
 Code and processed input tables for the mosaicism benchmark study, organized
 into analysis pipelines and figure scripts
 
-- [Figure scripts](figure/README.md): seven scripts for the listed manuscript panels.
+- [Figure scripts](figure/README.md): eight scripts for the listed manuscript panels.
 - [Variant calling](pipelines/variant_calling/README.md): caller workflows, configurations, and alignment placeholders; ppmSeq calling is maintained separately.
 - [Data preparation](pipelines/data_preparation/README.md): annotation, filtering, read evidence, coverage, and signature analysis.
 - `raw_data/`: 15 processed analysis tables and 25 coverage CDF tables used by the figure scripts, not raw sequencing reads.

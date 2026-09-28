@@ -12,6 +12,7 @@ as its working directory. Inputs are in `../raw_data/`, shared styling is in
 - [Figures 4b–4d](fig4b_4c_4d_read_support.Rmd): read support and allele fractions.
 - [Figures 4e, 4g–4h and Extended Data 4b](fig4e_4g_4h_extData4b_correlations_signatures.Rmd): correlations and read-supported signatures.
 - [Figure 5g](fig5g_lolliplot_geoclone.Rmd): four representative geoclones across 11 tissues.
+- [Extended Data Figure 2](ext_data_fig2_generation.Rmd): caller-wise genomic feature enrichment, with a clustered bubble plot.
 
 The filenames use manuscript numbering; original chunk names are retained.
 For Figure 5g use the `fig2a-style-four-pattern-export` chunk. Other exploratory
@@ -45,9 +46,30 @@ from CRAN, plus ComplexHeatmap from Bioconductor. HTML rendering also requires
 rmarkdown and Pandoc; the shared style uses Arial. A tested, version-pinned R
 environment is not yet supplied.
 
-All input tables for these seven scripts are included.
+All input tables for these eight scripts are included.
 
 For read-support methodology, cite [RIVER](../README.md#related-software-and-citation).
 The supplied figure tables can be plotted without installing RIVER or rerunning
-variant callers. Extended Data 2 (RIVER input-control/FDR analysis) is not
-included in this seven-script set.
+variant callers.
+
+## Extended Data Figure 2
+
+Run all chunks of `ext_data_fig2_generation.Rmd` in order from this directory:
+
+```bash
+Rscript -e 'rmarkdown::render("ext_data_fig2_generation.Rmd")'
+```
+
+The notebook uses the three existing pileup TSVs in `../raw_data/`; genomic
+feature summaries are calculated from the final filtered table. It compares
+caller groups across ten genomic annotation features and exports the final
+clustered bubble plot to `../output/ext_data_fig2_genomic_feature_bubbleplot.pdf`.
+It requires readr, dplyr, tidyr, ggplot2, stringr, scales, tibble, ggdendro,
+patchwork, and an R build with Cairo PDF support. HTML rendering additionally
+requires rmarkdown and Pandoc.
+
+This is the supplied genomic-feature notebook designated as Extended Data
+Figure 2; it is separate from the earlier proposed RIVER input-control/FDR
+analysis. The submitted copy uses package-relative input and output paths.
+Feature labels are mapped to their matching feature identifiers; the supplied
+statistical and clustering calculations are unchanged.

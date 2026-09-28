@@ -1,0 +1,250 @@
+---
+title: "Extended Data Figure 2: genomic feature enrichment"
+author: "dcha"
+date: "2026-08-24"
+output: html_document
+---
+
+### Finalized TSVs
+```{r}
+library(readr)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+
+raw <- read_tsv("../raw_data/raw_duplex_pileup_newPTA_altge1.tsv")
+nogerm <- read_tsv("../raw_data/no_germline.no_blacklist.duplex_pileup_newPTA_altge1.tsv")
+filt <- read_tsv("../raw_data/no_unrelated.no_germline.no_blacklist.duplex_pileup_newPTA_altge1_unrel_lowci.tsv")
+```
+
+## Caller wise variant annotation character
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(stringr)
+
+call_cols <- c("call_Illumina", "call_ppmSeq_multiread", "call_ppmSeq_singleton_HC", "call_UDSeq_multiread", "call_UDSeq_singleton", "call_NanoSeq_multiread", "call_NanoSeq_singleton", "call_HiDEFseq_double_stranded", "call_HiDEFseq_single_stranded", "call_PTA_singleton")
+feature_cols <- c("RNA_SEQ", "CAGE", "PROCAP", "DNASE", "ATAC", "CHIP_HISTONE", "CHIP_TF", "SPLICE_SITES", "SPLICE_SITE_USAGE", "CONTACT_MAPS")
+
+caller_df <- filt %>%
+  dplyr::mutate(variant_id = paste(chr, pos, ref, alt, sep = ":")) %>%
+  tidyr::pivot_longer(dplyr::all_of(call_cols), names_to = "caller", values_to = "called") %>%
+  dplyr::filter(called == 1) %>%
+  dplyr::mutate(caller = stringr::str_remove(caller, "^call_"))
+
+# 2. Numeric feature summary
+numeric_long <- caller_df %>%
+  tidyr::pivot_longer(dplyr::all_of(feature_cols), names_to = "feature", values_to = "value") %>%
+  dplyr::filter(is.finite(value))
+
+numeric_summary <- numeric_long %>%
+  dplyr::group_by(caller, feature) %>%
+  dplyr::summarise(n = dplyr::n(), median = median(value), q25 = quantile(value, 0.25), q75 = quantile(value, 0.75), .groups = "drop")
+
+numeric_summary
+
+caller_feature_results <- numeric_long %>%
+  dplyr::group_by(feature) %>%
+  dplyr::mutate(percentile = dplyr::percent_rank(value)) %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(feature, caller) %>%
+  dplyr::summarise(
+    n = dplyr::n(),
+    median = median(value, na.rm = TRUE),
+    median_percentile = median(percentile, na.rm = TRUE),
+    p = wilcox.test(
+      value,
+      numeric_long$value[numeric_long$feature == dplyr::first(feature) &
+                         numeric_long$caller != dplyr::first(caller)],
+      exact = FALSE
+    )$p.value,
+    .groups = "drop"
+  ) %>%
+  dplyr::group_by(feature) %>%
+  dplyr::mutate(FDR = p.adjust(p, method = "BH")) %>%
+  dplyr::ungroup() %>%
+  dplyr::arrange(feature, dplyr::desc(median_percentile))
+
+caller_feature_results
+```
+
+
+
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(readr)
+
+plot_df <- caller_feature_results %>%
+  dplyr::mutate(
+    effect = median_percentile - 0.5,
+    sig = FDR < 0.05,
+    size_score = -log10(pmax(FDR, 1e-300)),
+    caller = factor(caller, levels = c(
+      "Illumina",
+      "ppmSeq_multiread", "ppmSeq_singleton_HC",
+      "UDSeq_multiread", "UDSeq_singleton",
+      "NanoSeq_multiread", "NanoSeq_singleton",
+      "HiDEFseq_double_stranded", "HiDEFseq_single_stranded",
+      "PTA_singleton"
+    )),
+    feature = factor(feature, levels = rev(c(
+      "RNA_SEQ", "CAGE", "PROCAP", "DNASE", "ATAC",
+      "CHIP_HISTONE", "CHIP_TF", "SPLICE_SITES",
+      "SPLICE_SITE_USAGE", "CONTACT_MAPS"
+    )))
+  )
+
+```
+
+
+```{r}
+caller_labels <- c(
+  "Illumina" = "IlluminaSeq",
+  "ppmSeq_multiread" = "ppmSeq multiread",
+  "ppmSeq_singleton_HC" = "ppmSeq singleton",
+  "UDSeq_multiread" = "UDSeq multiread",
+  "UDSeq_singleton" = "UDSeq singleton",
+  "NanoSeq_multiread" = "NanoSeq multiread",
+  "NanoSeq_singleton" = "NanoSeq singleton",
+  "HiDEFseq_double_stranded" = "HiDEF-seq (ds)",
+  "HiDEFseq_single_stranded" = "HiDEF-seq (ss)",
+  "PTA_singleton" = "PTA-Seq"
+)
+
+feature_labels <- c(
+  "RNA_SEQ" = "RNA expression",
+  "CAGE" = "CAGE (promoter/TSS activity)",
+  "PROCAP" = "PRO-cap (active transcription initiation)",
+  "DNASE" = "DNase I hypersensitivity",
+  "ATAC" = "ATAC (chromatin accessibility)",
+  "CHIP_HISTONE" = "Histone modification (ChIP-seq)",
+  "CHIP_TF" = "TFBS (ChIP-seq)",
+  "SPLICE_SITES" = "Splice-site annotation",
+  "SPLICE_SITE_USAGE" = "Splice-site usage",
+  "CONTACT_MAPS" = "3D contact signal"
+)
+
+plot_df2 <- plot_df %>%
+  dplyr::mutate(
+    caller = factor(caller, levels = names(caller_labels), labels = unname(caller_labels)),
+    feature = factor(feature, levels = names(feature_labels), labels = unname(feature_labels))
+  )
+
+ggplot(plot_df2, aes(x = caller, y = feature)) +
+  geom_point(aes(size = size_score, fill = effect), shape = 21, color = NA, alpha = 0.9) +
+  geom_point(
+    data = dplyr::filter(plot_df2, sig),
+    aes(size = size_score, fill = effect),
+    shape = 21, color = "black", stroke = 0.7, alpha = 0.9
+  ) +
+  scale_fill_gradient2(
+    low = "#3B6FB6", mid = "white", high = "#C94C4C",
+    midpoint = 0, limits = c(-0.35, 0.35), oob = scales::squish,
+    name = "Median percentile shift"
+  ) +
+  scale_size_continuous(
+    range = c(2, 12),
+    name = expression(-log[10]("(FDR)"))
+  ) +
+  labs(x = NULL, y = NULL) +
+  theme_classic(base_size = 13) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1),
+    axis.text.y = element_text(size = 11),
+    axis.line = element_blank(),
+    axis.ticks = element_blank(),
+    legend.position = "right"
+  )
+```
+
+### AlphaGenome enrichment w/ dendrogram
+```{r}
+library(ggplot2); library(dplyr); library(tidyr); library(scales); library(tibble)
+library(ggdendro); library(patchwork)
+
+# ===== parameters =====
+bubble_min <- 1.2
+bubble_max <- 5.0      # max circle size는 여기서 조정
+stroke_sig <- 0.45
+effect_full_lim <- c(-0.36, 0.36)
+
+# ===== make effect matrix: rows = feature, columns = caller =====
+effect_mat_col_hclust <- plot_df2 %>%
+  select(feature, caller, effect) %>%
+  pivot_wider(names_from = caller, values_from = effect) %>%
+  column_to_rownames("feature") %>%
+  as.matrix()
+
+effect_mat_col_hclust[is.na(effect_mat_col_hclust)] <- 0
+
+# ===== column hclust =====
+caller_hclust <- hclust(dist(t(effect_mat_col_hclust)), method = "complete")
+caller_order_col_hclust <- caller_hclust$labels[caller_hclust$order]
+
+# ===== reverse leaf order while preserving dendrogram structure =====
+caller_order_col_hclust_rev <- rev(caller_order_col_hclust)
+n_caller_col_hclust <- length(caller_order_col_hclust)
+
+plot_df2_col_hclust_rev <- plot_df2 %>%
+  mutate(caller = factor(caller, levels = caller_order_col_hclust_rev))
+
+# ===== dendrogram data + mirror flip =====
+dendro_col_hclust <- ggdendro::dendro_data(caller_hclust, type = "rectangle")
+
+dendro_segment_col_hclust_rev <- segment(dendro_col_hclust) %>%
+  mutate(x = n_caller_col_hclust + 1 - x,
+         xend = n_caller_col_hclust + 1 - xend)
+
+p_dendro_col_hclust_rev <- ggplot(dendro_segment_col_hclust_rev) +
+  geom_segment(aes(x = x, y = y, xend = xend, yend = yend), linewidth = 0.35) +
+  scale_x_continuous(limits = c(0.5, n_caller_col_hclust + 0.5),
+                     breaks = seq_along(caller_order_col_hclust_rev),
+                     labels = caller_order_col_hclust_rev,
+                     expand = c(0, 0)) +
+  labs(x = NULL, y = NULL) +
+  theme_void(base_size = 9) +
+  theme(plot.margin = margin(2, 4, -2, 3))
+
+# ===== bubble plot with reversed hclust order =====
+p_bubble_col_hclust_rev <- ggplot(plot_df2_col_hclust_rev, aes(x = caller, y = feature)) +
+  geom_point(aes(size = size_score, fill = effect), shape = 21, color = NA, alpha = 0.95) +
+  geom_point(data = filter(plot_df2_col_hclust_rev, sig), aes(size = size_score, fill = effect),
+             shape = 21, color = "black", stroke = stroke_sig, alpha = 0.95) +
+  scale_fill_gradientn(colors = c("#4575B4", "#A6CEE3", "#F7F7F7", "#F4A582", "#D73027"),
+                       values = rescale(c(-0.36, -0.10, 0, 0.10, 0.36)),
+                       limits = effect_full_lim, oob = squish,
+                       name = "Median percentile shift") +
+  scale_size_continuous(range = c(bubble_min, bubble_max),
+                        name = expression(-log[10]("(FDR)"))) +
+  scale_x_discrete(limits = caller_order_col_hclust_rev, expand = expansion(add = 0.5)) +
+  labs(x = NULL, y = NULL) +
+  theme_classic(base_size = 9) +
+  theme(axis.text.x = element_text(angle = 35, hjust = 1, vjust = 1, size = 8.5, color = "black"),
+        axis.text.y = element_text(size = 8.5, color = "black"),
+        axis.line = element_blank(), axis.ticks = element_blank(),
+        legend.position = "right",
+        legend.title = element_text(size = 8.3),
+        legend.text = element_text(size = 7.8),
+        legend.key.size = unit(0.35, "cm"),
+        plot.margin = margin(0, 4, 3, 3))
+
+# ===== combined plot =====
+p_col_hclust_with_dendro_rev <- p_dendro_col_hclust_rev / p_bubble_col_hclust_rev +
+  plot_layout(heights = c(0.22, 1))
+
+p_col_hclust_with_dendro_rev
+```
+
+
+```{r}
+dir.create("../output", recursive = TRUE, showWarnings = FALSE)
+ggsave("../output/ext_data_fig2_genomic_feature_bubbleplot.pdf",
+       plot = p_col_hclust_with_dendro_rev,
+       width = 9.2, height = 3.1, units = "in",
+       device = cairo_pdf, bg = "white")
+
+```
