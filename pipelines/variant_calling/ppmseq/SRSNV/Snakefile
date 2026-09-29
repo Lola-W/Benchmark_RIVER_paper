@@ -57,7 +57,7 @@ SBSMAP_VCF       = pjoin(SBS_DIR, "{sample}.sbsMap.vcf.gz")
 # homMap and training regions
 SRSNV_SIF     = config["srsnv_sif"].strip()
 HOM_TMP_ROOT  = pjoin(OUT_BASE, "srsnv_tmp")
-HOM_DIR       = pjoin(OUT_BASE, "3.0-create_homeSnvFeatureMap", "{sample}")
+HOM_DIR       = pjoin(OUT_BASE, "3.0-create_homSnvFeatureMap", "{sample}")
 HOM_VCF       = pjoin(HOM_DIR, "{sample}.homMap.vcf.gz")
 AUTO_BED      = config["auto_bed"].strip()
 HMERS_BED     = config["hmers_bed"].strip()
