@@ -1,0 +1,435 @@
+# =============================================================================
+# Ultima Single Read SNV (SRSNV) pipeline for ppmSeq CRAM files
+#
+#   CRAM -> sharded FeatureMap -> annotated FeatureMap -> sbsMap, homMap
+#        -> trained classifier -> outMap (input of the post-hoc filtering)
+#
+# All settings are read from snake_conf.yaml.
+# Sample sheet (config: input_paths), tab-separated, one sample per line:
+#   id  sex  cram  sample  sorter_stats_json  matched_normal
+# =============================================================================
+
+configfile: "snake_conf.yaml"
+import os, glob, re
+
+wildcard_constraints:
+    sample = r"[A-Za-z0-9._+\-]+",
+    shard  = r"[A-Za-z0-9._\-]+"
+
+# ---------- helpers ----------
+_WS = re.compile(r"[\s\u00A0\u200B\u200C\u200D]+")  # whitespace incl. NBSP and zero-width characters
+def pjoin(*parts):
+    clean = [_WS.sub(" ", str(x)).strip() for x in parts]
+    return os.path.join(*clean)
+
+# ---------- config ----------
+JAVA          = config["java"].strip()
+GATK_JAR      = config["gatk4"].strip()
+BCFTOOLS      = config["bcftools"].strip()
+TABIX         = config["tabix"].strip()
+REF_FASTA     = config["ref_fasta"].strip()
+OUT_BASE      = config["out_base"].strip()
+FEATUREMAP_SH = config["featuremap_sh"].strip()
+
+# FeatureMap paths (shared by producer and consumer rules)
+FEATUREMAP_VCF = pjoin(OUT_BASE, "18.srsnv", "{sample}", "00.featureMap",
+                       "{sample}_{shard}.feature.vcf.gz")
+GATHERED_VCF   = pjoin(OUT_BASE, "18.srsnv", "{sample}", "00.featureMap",
+                       "{sample}.gathered.feature.vcf.gz")
+
+# annotate_featuremap
+REGIONS_BED = config["regions_bed"].strip()
+FLOW_ORDER  = config.get("flow_order", "TGCA").strip()
+MOTIF_LEN   = int(config.get("motif_length_to_annotate", 3))
+MAX_HMER    = int(config.get("max_hmer_length", 20))
+PPM_ADAPTER = config.get("ppmseq_adapter_version", "v1").strip()
+
+ANNOT_DIR      = pjoin(OUT_BASE, "1.0-Annotate_featuremap", "{sample}")
+ANNOTMAP_DECOY = pjoin(ANNOT_DIR, "{sample}.annotMap_decoy.vcf.gz")
+ANNOTMAP_FINAL = pjoin(ANNOT_DIR, "{sample}.annotMap.vcf.gz")
+
+# sbsMap (vcflite)
+VCFLITE_SIF      = config["vcflite_sif"].strip()
+VCFLITE_TMP_ROOT = pjoin(OUT_BASE, "vcflite_tmp")
+SBS_DIR          = pjoin(OUT_BASE, "2.0-vcflite_SBSMap", "{sample}")
+SBSMAP_VCF       = pjoin(SBS_DIR, "{sample}.sbsMap.vcf.gz")
+
+# homMap and training regions
+SRSNV_SIF     = config["srsnv_sif"].strip()
+HOM_TMP_ROOT  = pjoin(OUT_BASE, "srsnv_tmp")
+HOM_DIR       = pjoin(OUT_BASE, "3.0-create_homeSnvFeatureMap", "{sample}")
+HOM_VCF       = pjoin(HOM_DIR, "{sample}.homMap.vcf.gz")
+AUTO_BED      = config["auto_bed"].strip()
+HMERS_BED     = config["hmers_bed"].strip()
+PANCAN_VCF    = config["pancan_vcf"].strip()
+BED_DIRECTORY = pjoin(OUT_BASE, "bed_directory")
+HCR_BED       = config["hcr_bed"].strip()
+DBSNP_VCF     = config["dbsnp_vcf"].strip()
+GNOMAD_VCF    = config["gnomad_vcf"].strip()
+
+# classifier training
+SINGLE_READ_JSON = config["single_read_params"].strip()
+REF_DICT         = config["ref_dict"].strip()
+TRAIN_DIR        = pjoin(OUT_BASE, "4.0-train_SNVQ", "{sample}")
+TRAIN_TMP_ROOT   = pjoin(OUT_BASE, "snvq_tmp")
+
+# inference (outMap)
+OUT_MAP_DIR = pjoin(OUT_BASE, "6.0-outmap", "{sample}")
+OUT_MAP_VCF = pjoin(OUT_MAP_DIR, "{sample}.outMap.vcf.gz")
+
+# singularity
+FEATUREMAP_SIF = config["featuremap_sif"].strip()
+SING_MOD       = config.get("singularity_module", "").strip()
+_SB = config.get("singularity_bind", [])  # list or comma-separated string
+if isinstance(_SB, str):
+    BIND_DIRS = [p.strip() for p in _SB.split(",") if p.strip()]
+else:
+    BIND_DIRS = [str(p).strip() for p in _SB]
+BIND_ARG = ",".join(BIND_DIRS) if BIND_DIRS else ""
+
+# ---------- samples ----------
+SAMPLES = {}
+JSONS = {}
+MATCHED_NORMAL = {}  # read from the sample sheet but not used by any rule
+with open(config["input_paths"], "r") as f:
+    for line in f:
+        if not line.strip() or line.lstrip().startswith("#"): continue
+        id_, sex, path, sample, json, matched = [x.strip() for x in line.rstrip("\n").split("\t")]
+        SAMPLES[sample] = path
+        JSONS[sample] = json
+        MATCHED_NORMAL[sample] = matched
+SAMPLE_NAMES = sorted(SAMPLES.keys())
+
+# ---------- scatter settings ----------
+SCATTER         = int(config.get("scatter_count", 48))
+SUBDIV          = config.get("subdivision_mode", "BALANCING_WITHOUT_INTERVAL_SUBDIVISION").strip()
+BASE_INT        = config.get("base_intervals", "").strip()
+PAD             = int(config.get("interval_padding", 0))
+THREADS_PER_JOB = int(config.get("threads_per_job", 22))
+MEM_GB_PER_JOB  = int(config.get("mem_gb", 120))
+INTERVALS_DIR   = pjoin(OUT_BASE, "intervals_scatter")
+
+def opt_L():
+    return f"-L {BASE_INT}" if BASE_INT else ""
+
+# ---------- target ----------
+rule all:
+    input:
+        expand(GATHERED_VCF, sample=SAMPLE_NAMES),
+        expand(ANNOTMAP_FINAL, sample=SAMPLE_NAMES),
+        expand(OUT_MAP_VCF, sample=SAMPLE_NAMES),
+
+# ---------- scatter ----------
+checkpoint split_intervals:
+    output: intervals = directory(INTERVALS_DIR)
+    params: opt_L = opt_L(), scatter = SCATTER, subdiv = SUBDIV
+    shell:
+        r"""
+        mkdir -p {output.intervals}
+        {JAVA} -Xmx4g -jar {GATK_JAR} SplitIntervals \
+          -R {REF_FASTA} {params.opt_L} \
+          --scatter-count {params.scatter} \
+          --subdivision-mode {params.subdiv} \
+          -O {output.intervals}
+        """
+
+# shard names are discovered after the checkpoint has run
+def scattered_files(wc):
+    ck = checkpoints.split_intervals.get(**wc)
+    return sorted(glob.glob(pjoin(ck.output.intervals, "*.interval_list")))
+
+def shard_labels(wc):
+    return [os.path.basename(p).replace(".interval_list", "").strip()
+            for p in scattered_files(wc)]
+
+# ---------- FeatureMap ----------
+# FlowFeatureMapper on one shard
+rule featuremap_shard:
+    input:
+        cram     = lambda wc: SAMPLES[wc.sample],
+        interval = lambda wc: pjoin(checkpoints.split_intervals.get(**wc).output.intervals,
+                                    wc.shard + ".interval_list")
+    output:
+        vcf = FEATUREMAP_VCF
+    params:
+        sh = FEATUREMAP_SH, pad = PAD
+    threads: THREADS_PER_JOB
+    resources: mem_gb = MEM_GB_PER_JOB
+    shell:
+        "REF={REF_FASTA} GATK_JAR={GATK_JAR} JAVA={JAVA} "
+        "bash {params.sh} {wildcards.sample} {wildcards.shard} {input.cram} "
+        "{OUT_BASE} {input.interval} {params.pad} {resources.mem_gb} {threads}"
+
+# list of the shard VCFs of a sample
+rule make_sample_feature_vcf_list:
+    input:
+        vcf_shards = lambda wc: expand(
+            FEATUREMAP_VCF,
+            sample=[wc.sample],
+            shard=shard_labels(wc)
+        )
+    output:
+        listfile = pjoin(OUT_BASE, "18.srsnv", "{sample}", "00.featureMap", "{sample}.vcfs.list")
+    shell:
+        r"""printf "%s\n" {input.vcf_shards} | sed 's/[[:space:]]\+$//' > {output.listfile}"""
+
+# merge the shards
+rule gather_featuremap:
+    input:
+        listfile = pjoin(OUT_BASE, "18.srsnv", "{sample}", "00.featureMap", "{sample}.vcfs.list")
+    output:
+        merged = GATHERED_VCF
+    shell:
+        r"""{JAVA} -Xmx8g -jar {GATK_JAR} GatherVcfsCloud -I {input.listfile} -O {output.merged}"""
+
+# re-compress to BGZF, then index
+rule index_gathered_featuremap:
+    input:
+        vcf = GATHERED_VCF
+    output:
+        tbi = GATHERED_VCF + ".tbi"
+    threads: 4
+    shell:
+        r'''
+        set -euo pipefail
+        {BCFTOOLS} view -Oz -o "{input.vcf}.bgz" "{input.vcf}"
+        mv -f "{input.vcf}.bgz" "{input.vcf}"
+        {BCFTOOLS} index -ft "{input.vcf}"
+        '''
+
+# ---------- annotation ----------
+rule annotate_featuremap:
+    input:
+        vcf = GATHERED_VCF,
+        tbi = GATHERED_VCF + ".tbi",
+        ref = REF_FASTA
+    output:
+        decoy = temp(ANNOTMAP_DECOY)
+    params:
+        outdir  = lambda wc: os.path.dirname(ANNOTMAP_DECOY.format(sample=wc.sample)),
+        sif     = FEATUREMAP_SIF,
+        binds   = BIND_ARG,
+        flow    = FLOW_ORDER,
+        motif   = MOTIF_LEN,
+        maxh    = MAX_HMER,
+        adapter = PPM_ADAPTER,
+        mod     = SING_MOD
+    threads: 12
+    resources: mem_gb = 84
+    shell:
+        r'''
+        set -euo pipefail
+        mkdir -p {params.outdir}
+
+        # optional environment module
+        if [[ -n "{params.mod}" ]]; then
+          if [[ -f /etc/profile.d/modules.sh ]]; then source /etc/profile.d/modules.sh; fi
+          module load {params.mod}
+        fi
+
+        [[ -s "{params.sif}" ]] || {{ echo "ERROR: SIF not found: {params.sif}" >&2; exit 1; }}
+
+        BIND_OPT=""
+        if [[ -n "{params.binds}" ]]; then
+          BIND_OPT="-B {params.binds}"
+        fi
+
+        singularity exec --cleanenv $BIND_OPT "{params.sif}" \
+          annotate_featuremap \
+            -i {input.vcf} \
+            -o {output.decoy} \
+            --ref_fasta {input.ref} \
+            --flow_order {params.flow} \
+            --motif_length_to_annotate {params.motif} \
+            --max_hmer_length {params.maxh} \
+            --ppmSeq_adapter_version "{params.adapter}"
+
+        # remove per-contig intermediate files
+        rm -f {params.outdir}/chr* {params.outdir}/HLA*
+        '''
+
+# restrict to the regions of interest and index
+rule subset_regions_and_index:
+    input:
+        vcf = ANNOTMAP_DECOY,
+        bed = REGIONS_BED
+    output:
+        vcf = ANNOTMAP_FINAL,
+        tbi = ANNOTMAP_FINAL + ".tbi"
+    threads: 12
+    resources: mem_gb = 84
+    shell:
+        r"""
+        {BCFTOOLS} view --threads {threads} -T {input.bed} {input.vcf} -O z -o {output.vcf}
+        {TABIX} -f -p vcf {output.vcf}
+        """
+
+# ---------- training data ----------
+# sbsMap: loci with exactly one record (FP-like)
+rule vcflite_sbsmap:
+    input:
+        annot = ANNOTMAP_FINAL,
+        annot_tbi = ANNOTMAP_FINAL + ".tbi"
+    output:
+        vcf = SBSMAP_VCF,
+        tbi = SBSMAP_VCF + ".tbi"
+    params:
+        tmpdir = pjoin(VCFLITE_TMP_ROOT, "{sample}"),
+        outdir = lambda wc: os.path.dirname(SBSMAP_VCF.format(sample=wc.sample)),
+        sif    = VCFLITE_SIF,
+        binds  = BIND_ARG,
+        mod    = SING_MOD
+    threads: 8
+    resources:
+        mem_gb = 32
+    shell:
+        r'''
+        set -euo pipefail
+        mkdir -p {params.outdir} {params.tmpdir}
+
+        # optional environment module
+        if [[ -n "{params.mod}" ]]; then
+          [[ -f /etc/profile.d/modules.sh ]] && source /etc/profile.d/modules.sh
+          module load {params.mod}
+        fi
+
+        [[ -s "{params.sif}" ]] || {{ echo "ERROR: vcflite SIF not found: {params.sif}" >&2; exit 1; }}
+
+        BIND_OPT=""
+        [[ -n "{params.binds}" ]] && BIND_OPT="-B {params.binds}"
+
+        singularity exec --cleanenv $BIND_OPT --pwd "{params.tmpdir}" "{params.sif}" \
+          vcflite import --vcf-in "{input.annot}"
+
+        # keep loci with exactly one record
+        singularity exec --cleanenv $BIND_OPT --pwd "{params.tmpdir}" "{params.sif}" \
+          vcflite query --group-by "chrom, pos" --having "COUNT(*) = 1" --vcf-out "{output.vcf}"
+
+        {TABIX} -f -p vcf "{output.vcf}"
+        '''
+
+# homMap: homozygous SNVs (TP-like)
+rule create_Hom_Snv_Feature_Map:
+    input:
+        vcf = ANNOTMAP_FINAL,
+        annot_tbi = ANNOTMAP_FINAL + ".tbi",
+        json = lambda wc: JSONS[wc.sample]
+    output:
+        vcf = HOM_VCF,
+    params:
+        tmpdir = pjoin(HOM_TMP_ROOT, "{sample}"),
+    singularity:
+        SRSNV_SIF,
+    threads: 8
+    resources:
+        mem_gb = 32,
+    shell:
+        "create_hom_snv_featuremap "
+        "--featuremap {input.vcf} "
+        "--sorter_stats_json {input.json} "
+        "--hom_snv_featuremap {output.vcf} "
+        "--requested_min_coverage 20 "
+        "--min_af 0.7"
+
+# training regions for TP
+rule bed_intersect_and_exclude_tp:
+    input:
+        auto_bed = AUTO_BED,
+        hmers_bed = HMERS_BED,
+        pancan_vcf = PANCAN_VCF,
+    output:
+        tp_training_bed = pjoin(BED_DIRECTORY, "training_tp.bed"),
+    params:
+        tmpdir = HOM_TMP_ROOT,
+    singularity:
+        SRSNV_SIF,
+    threads: 8
+    resources:
+        mem_gb = 32,
+    shell:
+        "intersect_bed_regions "
+        "--include-regions {input.auto_bed} "
+        "--exclude-regions {input.hmers_bed} {input.pancan_vcf} "
+        "--output-bed {output.tp_training_bed}"
+
+# training regions for FP
+rule bed_intersect_and_exclude_fp:
+    input:
+        hcr_bed = HCR_BED,
+        hmers_bed = HMERS_BED,
+        pancan_vcf = PANCAN_VCF,
+        dbsnp_vcf = DBSNP_VCF,
+        gnomad_vcf = GNOMAD_VCF
+    output:
+        fp_training_bed = pjoin(BED_DIRECTORY, "training_fp.bed"),
+    params:
+        tmpdir = HOM_TMP_ROOT,
+    singularity:
+        SRSNV_SIF,
+    threads: 8
+    resources:
+        mem_gb = 32,
+    shell:
+        "intersect_bed_regions "
+        "--include-regions {input.hcr_bed} "
+        "--exclude-regions {input.hmers_bed} {input.pancan_vcf} {input.dbsnp_vcf} {input.gnomad_vcf} "
+        "--output-bed {output.fp_training_bed}"
+
+# ---------- classifier ----------
+rule train_snvq:
+    input:
+        tp_training_bed = pjoin(BED_DIRECTORY, "training_tp.bed"),
+        fp_training_bed = pjoin(BED_DIRECTORY, "training_fp.bed"),
+        json = lambda wc: JSONS[wc.sample],
+        hom_vcf = HOM_VCF,
+        sbs_vcf = SBSMAP_VCF,
+        single_read_json = SINGLE_READ_JSON,
+        fasta = REF_FASTA,
+        ref_dict = REF_DICT,
+    output:
+        done_file = pjoin(TRAIN_DIR, "done.txt"),
+    params:
+        tmpdir = pjoin(TRAIN_TMP_ROOT, "{sample}"),
+        train_dir = TRAIN_DIR,
+    singularity:
+        SRSNV_SIF,
+    threads: 8
+    resources:
+        mem_gb = 32,
+    shell:
+        "srsnv_training "
+        "--hom_snv_featuremap {input.hom_vcf} "
+        "--single_substitution_featuremap {input.sbs_vcf} "
+        "--dataset_params_json_path {input.single_read_json} "
+        "--flow_order 'TGCA' "
+        "--reference_fasta {input.fasta} "
+        "--reference_dict {input.ref_dict} "
+        "--cram_stats_file {input.json} "
+        "--hom_snv_regions {input.tp_training_bed} "
+        "--single_sub_regions {input.fp_training_bed} "
+        "--output {params.train_dir} "
+        "--basename {wildcards.sample} && "
+        "touch {output.done_file} "
+
+# outMap: apply the trained model to the annotated FeatureMap
+rule inferSNVQ_singularity:
+    input:
+        annot = ANNOTMAP_FINAL,
+        done_file = pjoin(TRAIN_DIR, "done.txt"),
+    output:
+        outmap = OUT_MAP_VCF,
+    params:
+        train_dir = TRAIN_DIR,
+        outmap_dir = OUT_MAP_DIR,
+    singularity:
+        SRSNV_SIF,
+    threads: 8
+    resources:
+        mem_gb = 32,
+    shell:
+        "srsnv_inference "
+        "--featuremap_path {input.annot} "
+        "--model_joblib_path {params.train_dir}/{wildcards.sample}.model.joblib "
+        "--output_path {output.outmap} "
+        "--process_number 10 && "
+        "rm -f {params.outmap_dir}/chr*tbi"
