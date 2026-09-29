@@ -1,0 +1,2 @@
+# id	sex	cram	sample	sorter_stats_json	matched_normal
+sample_A1	M	/path/to/cram/sample_A1.cram	sample_A1	/path/to/cram/sample_A1.json	NA
