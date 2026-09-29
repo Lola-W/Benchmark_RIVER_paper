@@ -6,6 +6,7 @@ resources_dir: "resources"
 
 # Sample -> germline VCF (matched normal / joint-called germline variants)
 # Multiple samples from the same individual can share one germline VCF.
+# Every sample found in input_dir (*.outMap.vcf.gz) must have an entry here.
 germline_vcf:
   "sample_A1": "germline_variant/individual_A.joint.vcf.gz"
   "sample_A2": "germline_variant/individual_A.joint.vcf.gz"
