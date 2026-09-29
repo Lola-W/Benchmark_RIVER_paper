@@ -1,0 +1,296 @@
+configfile: "config.yaml"
+
+wildcard_constraints:
+    sample = "[^/]+"
+
+
+INPUT_DIR    = config["input_dir"]
+OUTPUT_DIR   = config["output_dir"]
+INTERM_DIR   = config["interm_dir"]
+RES          = config["resources_dir"]
+GERMLINE_VCF = config["germline_vcf"]
+
+def get_germline_vcf(wildcards):
+    return GERMLINE_VCF[wildcards.sample]
+
+SAMPLES, = glob_wildcards(INPUT_DIR + "/{sample}.outMap.vcf.gz")
+print("DEBUG - INPUT_DIR:", INPUT_DIR)
+print("DEBUG - SAMPLES found:", SAMPLES)
+
+# Reference files
+PON_VCF      = RES + "/PON_q40_12files.dedup.vcf"
+GNOMAD_VCF   = RES + "/af-only-gnomad.hg38.snps.AF_over_1e-3.vcf.gz"
+HMER_BED     = RES + "/hmers_7_and_higher.chr1-22XY.bed"
+STR_BED      = RES + "/simple_repeats_hg38.bed"
+
+# Final goal
+rule all:
+    input:
+        expand(OUTPUT_DIR + "/{sample}/final_multiread_{sample}.vcf.gz",          sample=SAMPLES),
+        expand(OUTPUT_DIR + "/{sample}/final_putative_multiread_{sample}.vcf.gz", sample=SAMPLES),
+        expand(OUTPUT_DIR + "/{sample}/final_singleton_HC_{sample}.vcf.gz",       sample=SAMPLES),
+
+# A1. outMap ∩ sbsMap overlap
+rule overlap_sbs:
+    threads: 4
+    resources:
+        mem_mb = 512,
+        runtime = 90
+    input:
+        outmap = INPUT_DIR + "/{sample}.outMap.vcf.gz",
+        sbs    = INPUT_DIR + "/{sample}.sbsMap.vcf.gz"
+    output:
+        vcf = INTERM_DIR + "/{sample}_outMap.intersect_sbsMap.vcf.gz",
+        tbi = INTERM_DIR + "/{sample}_outMap.intersect_sbsMap.vcf.gz.tbi"
+    log:
+        OUTPUT_DIR + "/{sample}/pipeline.log"
+    shell:
+        "bash {RES}/overlap_sbs.sh {input.outmap} {input.sbs} {output.vcf} {threads} >> {log} 2>&1"
+
+# A2. outMap ∩ homMap overlap
+rule overlap_hom:
+    threads: 4
+    resources:
+        mem_mb = 512,
+        runtime = 90
+    input:
+        outmap = INPUT_DIR + "/{sample}.outMap.vcf.gz",
+        hom    = INPUT_DIR + "/{sample}.homMap.vcf.gz"
+    output:
+        vcf = INTERM_DIR + "/{sample}_outMap.intersect_homMap.vcf.gz",
+        tbi = INTERM_DIR + "/{sample}_outMap.intersect_homMap.vcf.gz.tbi"
+    log:
+        OUTPUT_DIR + "/{sample}/pipeline.log"
+    shell:
+        "bash {RES}/overlap_hom.sh {input.outmap} {input.hom} {output.vcf} {threads} >> {log} 2>&1"
+
+# 1. step00: Extract PASS variants
+rule step00_pass:
+    resources:
+        mem_mb = 512,
+        runtime = 60
+    input:
+        outmap = INPUT_DIR + "/{sample}.outMap.vcf.gz"
+    output:
+        vcf = OUTPUT_DIR + "/{sample}/step00_PASS_{sample}.vcf.gz",
+        tbi = OUTPUT_DIR + "/{sample}/step00_PASS_{sample}.vcf.gz.tbi"
+    log:
+        OUTPUT_DIR + "/{sample}/pipeline.log"
+    shell:
+        "bash {RES}/pass_calls.sh {input.outmap} {output.vcf} >> {log} 2>&1"
+
+# 2. step01: Germline removal
+rule step01_germline:
+    resources:
+        mem_mb = 3000,
+        runtime = 60
+    input:
+        vcf = OUTPUT_DIR + "/{sample}/step00_PASS_{sample}.vcf.gz",
+        germline = get_germline_vcf
+    output:
+        vcf = OUTPUT_DIR + "/{sample}/step01_gatkhc_filtered_{sample}.vcf.gz",
+        tbi = OUTPUT_DIR + "/{sample}/step01_gatkhc_filtered_{sample}.vcf.gz.tbi"
+    log:
+        OUTPUT_DIR + "/{sample}/pipeline.log"
+    shell:
+        "python {RES}/vcf_to_vcf_overlap_filter.py "
+        "--input-vcf {input.vcf} "
+        "--filter-vcf {input.germline} "
+        "--output-vcf-gz {output.vcf} "
+        ">> {log} 2>&1"
+
+# 3. step02: ST/ET MIXED filter
+rule step02_st_et:
+    threads: 2
+    resources:
+        mem_mb = 256,
+        runtime = 20
+    input:
+        vcf = OUTPUT_DIR + "/{sample}/step01_gatkhc_filtered_{sample}.vcf.gz"
+    output:
+        vcf = OUTPUT_DIR + "/{sample}/step02_st_et_mixed_{sample}.vcf.gz",
+        tbi = OUTPUT_DIR + "/{sample}/step02_st_et_mixed_{sample}.vcf.gz.tbi"
+    log:
+        OUTPUT_DIR + "/{sample}/pipeline.log"
+    shell:
+        "bash {RES}/st_et_mixed.sh {input.vcf} {output.vcf} {threads} >> {log} 2>&1"
+
+# 4. step03: Homopolymer removal
+rule step03_hmer:
+    resources:
+        mem_mb = 512,
+        runtime = 30
+    input:
+        vcf = OUTPUT_DIR + "/{sample}/step02_st_et_mixed_{sample}.vcf.gz"
+    output:
+        vcf = OUTPUT_DIR + "/{sample}/step03_no_hmer7_{sample}.vcf.gz",
+        tbi = OUTPUT_DIR + "/{sample}/step03_no_hmer7_{sample}.vcf.gz.tbi"
+    log:
+        OUTPUT_DIR + "/{sample}/pipeline.log"
+    shell:
+        "bash {RES}/vcf_to_bed_overlap_filter.sh "
+        "-i {input.vcf} -b {HMER_BED} -o {output.vcf} -v "
+        ">> {log} 2>&1"
+
+# 5. step04: Simple tandem repeat removal
+rule step04_str:
+    resources:
+        mem_mb = 512,
+        runtime = 30
+    input:
+        vcf = OUTPUT_DIR + "/{sample}/step03_no_hmer7_{sample}.vcf.gz"
+    output:
+        vcf = OUTPUT_DIR + "/{sample}/step04_no_simple_repeats_{sample}.vcf.gz",
+        tbi = OUTPUT_DIR + "/{sample}/step04_no_simple_repeats_{sample}.vcf.gz.tbi"
+    log:
+        OUTPUT_DIR + "/{sample}/pipeline.log"
+    shell:
+        "bash {RES}/vcf_to_bed_overlap_filter.sh "
+        "-i {input.vcf} -b {STR_BED} -o {output.vcf} -v "
+        ">> {log} 2>&1"
+
+# 6. step05: PoN removal
+rule step05_pon:
+    resources:
+        mem_mb = 3000,
+        runtime = 40
+    input:
+        vcf = OUTPUT_DIR + "/{sample}/step04_no_simple_repeats_{sample}.vcf.gz"
+    output:
+        vcf = OUTPUT_DIR + "/{sample}/step05_no_pon_{sample}.vcf.gz",
+        tbi = OUTPUT_DIR + "/{sample}/step05_no_pon_{sample}.vcf.gz.tbi"
+    log:
+        OUTPUT_DIR + "/{sample}/pipeline.log"
+    shell:
+        "python {RES}/vcf_to_vcf_overlap_filter.py "
+        "--input-vcf {input.vcf} "
+        "--filter-vcf {PON_VCF} "
+        "--output-vcf-gz {output.vcf} "
+        ">> {log} 2>&1"
+
+# 7. step06: gnomAD removal
+rule step06_gnomad:
+    resources:
+        mem_mb = 3000,
+        runtime = 40
+    input:
+        vcf = OUTPUT_DIR + "/{sample}/step05_no_pon_{sample}.vcf.gz"
+    output:
+        vcf = OUTPUT_DIR + "/{sample}/step06_no_gnomad_{sample}.vcf.gz",
+        tbi = OUTPUT_DIR + "/{sample}/step06_no_gnomad_{sample}.vcf.gz.tbi"
+    log:
+        OUTPUT_DIR + "/{sample}/pipeline.log"
+    shell:
+        "python {RES}/vcf_to_vcf_overlap_filter.py "
+        "--input-vcf {input.vcf} "
+        "--filter-vcf {GNOMAD_VCF} "
+        "--output-vcf-gz {output.vcf} "
+    ">> {log} 2>&1"
+
+# 8a. step07a: VCF -> TSV conversion (from step06)
+rule step07a_conversion:
+    resources:
+        mem_mb = 1000,
+        runtime = 30
+    input:
+        vcf = OUTPUT_DIR + "/{sample}/step06_no_gnomad_{sample}.vcf.gz"
+    output:
+        tsv = OUTPUT_DIR + "/{sample}/step07a_{sample}.tsv"
+    log:
+        OUTPUT_DIR + "/{sample}/pipeline.log"
+    shell:
+        "python {RES}/conversion.py "
+        "--vcf {input.vcf} "
+        "--out {output.tsv} "
+        ">> {log} 2>&1"
+
+# 8b. step07b: trinuc threshold training (from A1 + A2)
+rule step07b_training:
+    resources:
+        mem_mb = 700,
+        runtime = 30
+    input:
+        sbs = INTERM_DIR + "/{sample}_outMap.intersect_sbsMap.vcf.gz",
+        hom = INTERM_DIR + "/{sample}_outMap.intersect_homMap.vcf.gz"
+    output:
+        tsv = OUTPUT_DIR + "/{sample}/trinuc_thresholds_{sample}.tsv"
+    log:
+        OUTPUT_DIR + "/{sample}/pipeline.log"
+    shell:
+        "python {RES}/hom_and_single.py "
+        "--single {input.sbs} "
+        "--homo {input.hom} "
+        "--outdir {OUTPUT_DIR}/{wildcards.sample} "
+        "--thresh-out {output.tsv} "
+        ">> {log} 2>&1"
+
+# 9. step07c: trinuc denoising (from 8a + 8b)
+rule step07c_denoising:
+    resources:
+        mem_mb = 2500,
+        runtime = 30
+    input:
+        pre = OUTPUT_DIR + "/{sample}/step07a_{sample}.tsv",
+        thr = OUTPUT_DIR + "/{sample}/trinuc_thresholds_{sample}.tsv"
+    output:
+        tsv = OUTPUT_DIR + "/{sample}/step07c_denoised_{sample}.tsv"
+    log:
+        OUTPUT_DIR + "/{sample}/pipeline.log"
+    shell:
+        "python {RES}/trinuc_denoising.py "
+        "--pre {input.pre} "
+        "--thr {input.thr} "
+        "--out {output.tsv} "
+        ">> {log} 2>&1"
+
+# 10. step07d: TSV -> VCF + multiread/singleton split
+rule step07d_integration:
+    threads: 2
+    resources:
+        mem_mb = 512,
+        runtime = 20
+    input:
+        tsv    = OUTPUT_DIR + "/{sample}/step07c_denoised_{sample}.tsv",
+        outmap = INPUT_DIR  + "/{sample}.outMap.vcf.gz",
+        prev   = OUTPUT_DIR + "/{sample}/step06_no_gnomad_{sample}.vcf.gz"
+    output:
+        vcf         = OUTPUT_DIR + "/{sample}/step07_trinuc_denoised_{sample}.vcf.gz",
+        tbi         = OUTPUT_DIR + "/{sample}/step07_trinuc_denoised_{sample}.vcf.gz.tbi",
+        multiread   = OUTPUT_DIR + "/{sample}/step07-1_multiread_{sample}.vcf.gz",
+        singleton   = OUTPUT_DIR + "/{sample}/step07-2_singleton_{sample}.vcf.gz",
+        true_single = OUTPUT_DIR + "/{sample}/step08-2_singleton_hc_{sample}.vcf.gz"
+    log:
+        OUTPUT_DIR + "/{sample}/pipeline.log"
+    shell:
+        "python {RES}/trinucDenoised_integration_refining.py "
+        "-p {input.prev} "
+        "-i {input.tsv} "
+        "-o {output.vcf} "
+        "-m {output.multiread} "
+        "-s {output.singleton} "
+        "-t {output.true_single} "
+        "--outmap {input.outmap} "
+        "--threads {threads} "
+        ">> {log} 2>&1"
+
+# 11. final: split into multiread/putative/singleton_HC
+rule final:
+    resources:
+        mem_mb = 512,
+        runtime = 25
+    input:
+        multiread   = OUTPUT_DIR + "/{sample}/step07-1_multiread_{sample}.vcf.gz",
+        singleton   = OUTPUT_DIR + "/{sample}/step07-2_singleton_{sample}.vcf.gz",
+        singleton_hc= OUTPUT_DIR + "/{sample}/step08-2_singleton_hc_{sample}.vcf.gz"
+    output:
+        final_multi    = OUTPUT_DIR + "/{sample}/final_multiread_{sample}.vcf.gz",
+        final_putative = OUTPUT_DIR + "/{sample}/final_putative_multiread_{sample}.vcf.gz",
+        final_single   = OUTPUT_DIR + "/{sample}/final_singleton_HC_{sample}.vcf.gz"
+    log:
+        OUTPUT_DIR + "/{sample}/pipeline.log"
+    shell:
+        "bash {RES}/make_final_vcfs.sh "
+        "{wildcards.sample} "
+        "{input.multiread} {input.singleton} {input.singleton_hc} "
+        "{OUTPUT_DIR}/{wildcards.sample} "
+        ">> {log} 2>&1"
