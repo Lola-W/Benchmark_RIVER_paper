@@ -1,0 +1,54 @@
+#!/bin/bash
+# Submit from the sample's working directory: sbatch run_srsnv_legacy.sb
+# Replace every <PLACEHOLDER>. 
+#SBATCH lines cannot use variables, so the log paths must match WORKDIR below.
+#SBATCH --job-name=<JOB_NAME>
+#SBATCH --partition=<PARTITION>
+#SBATCH --nodes=1
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=17
+#SBATCH --mem=180G
+#SBATCH --time=2-23:00:00
+#SBATCH --account=<ACCOUNT>
+#SBATCH --output=<WORKDIR>/log/%x.%j.out
+#SBATCH --error=<WORKDIR>/log/%x.%j.err
+
+set -euo pipefail
+
+# -------- paths --------
+WORKDIR="<WORKDIR>"
+SINGULARITY_DIR="<DIR_CONTAINING_SINGULARITY_BINARY>"
+
+# -------- environment --------
+source <CONDA_DIR>/etc/profile.d/conda.sh
+conda activate <ENV_NAME>
+
+# make the singularity command visible to the Snakefile shell blocks
+export PATH="${SINGULARITY_DIR}:${PATH}"
+
+mkdir -p "${WORKDIR}/log"
+cd "${WORKDIR}"
+
+echo "HOSTNAME: $(hostname)"
+echo "START: $(date)"
+echo "JOB_ID: ${SLURM_JOB_ID}"
+echo "WORKDIR: ${WORKDIR}"
+echo "CONDA_PREFIX: ${CONDA_PREFIX}"
+echo "SINGULARITY: $(which singularity || true)"
+echo "SNAKEMAKE: $(which snakemake || true)"
+echo "BCFTOOLS: $(which bcftools || true)"
+echo "TABIX: $(which tabix || true)"
+
+snakemake \
+  --snakefile Snakefile \
+  --configfile snake_conf.yaml \
+  --jobs ${SLURM_CPUS_PER_TASK} \
+  --cores ${SLURM_CPUS_PER_TASK} \
+  --resources mem_gb=180 \
+  --use-singularity \
+  --singularity-args "-B <BIND_PATH>:<BIND_PATH>" \
+  --latency-wait 120 \
+  --rerun-incomplete \
+  --printshellcmds
+
+echo "END: $(date)"
