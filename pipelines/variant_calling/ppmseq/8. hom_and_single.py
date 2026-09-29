@@ -3,12 +3,12 @@
 hom_and_single.py
 
 Purpose:
-    Learn a trinucleotide-context-specific ML_QUAL threshold. Two
-    training call sets are labeled and combined:
-        - FP-like (label 0): outMap variants shared with sbsMap
-        - TP-like (label 1): outMap variants shared with homMap
-    For each trinucleotide context, the ML_QUAL cutoff that best separates
-    the two classes (Youden's J) is written to a table.
+    Learn a trinucleotide-context-specific ML_QUAL threshold. 
+    Two labeled training sets are combined:
+        - FP-like (label 0): outMap variants shared with sbsMap, i.e. loci supported by a single read (singletons, likely artifacts)
+        - TP-like (label 1): outMap variants shared with homMap, i.e. loci where most reads support the variant (likely homozygous germline)
+    For each trinucleotide context, the ML_QUAL cutoff that best separates the two classes (Youden's J) is written to a table.
+    The approach follows the trinucleotide motif-specific thresholding.
 
 Usage:
     python hom_and_single.py \
@@ -28,15 +28,11 @@ Outputs:
                   data actually used: ML_QUAL, triN, label)
 
 Notes:
-    - A VCF with >= 10,000,000 records is randomly subsampled to exactly 1%
-      (seed 42) to limit memory use; smaller VCFs are used in full.
-      Thresholds are adjustable with --subsample-frac / --subsample-threshold.
-    - Contexts observed in only one class are skipped.
-    - Higher ML_QUAL is assumed to indicate a more likely true variant.
-    - The triN definition (including reverse-complementing reverse-strand
-      reads) must match conversion.py, because the thresholds are joined
-      to the variant table by triN in trinuc_denoising.py.
-
+    - A VCF with >= 10,000,000 records is randomly subsampled to exactly 1% (seed 42) to limit memory use.
+    - triN is the trinucleotide substitution context in the orientation in which the read was sequenced (192 motifs).
+    - ML_QUAL is the raw (pre-recalibration) score of the SRSNV classifier, stored in INFO.
+      Thresholds are on the ML_QUAL scale. Higher values are assumed to indicate a more likely true variant.
+      
 Pipeline context:
     Snakemake rule step07b_training. The thresholds table is consumed by
     trinuc_denoising.py (step07c).
