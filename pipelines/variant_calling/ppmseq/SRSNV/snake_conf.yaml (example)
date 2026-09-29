@@ -1,0 +1,55 @@
+# --- inputs ---
+input_paths: input_paths.tsv
+
+# --- outputs (working directory of one sample) ---
+out_base: /path/to/output/<sample>
+
+# --- tools ---
+java: /path/to/jdk-24.0.1/bin/java
+gatk4: /path/to/gatk-4.6.2.0/gatk-package-4.6.2.0-local.jar
+bcftools: bcftools
+tabix: tabix
+
+# --- reference genome ---
+ref_fasta: /path/to/resources/Homo_sapiens_assembly38.fasta
+ref_dict: /path/to/resources/Homo_sapiens_assembly38.dict
+regions_bed: /path/to/resources/ug_hcr.bed
+
+# --- singularity / apptainer ---
+featuremap_sif: /path/to/containers/ugbio_featuremap_1.7.0.sif
+vcflite_sif: /path/to/containers/ugbio_vcflite_1.4.1.sif
+srsnv_sif: /path/to/containers/ugbio_srsnv_1.5.1.sif
+
+singularity_module: ""
+singularity_bind:
+  - /path/to/bind
+
+# --- scatter settings ---
+base_intervals: /path/to/resources/Homo_sapiens_assembly38.bed
+scatter_count: 48
+subdivision_mode: BALANCING_WITHOUT_INTERVAL_SUBDIVISION
+interval_padding: 0
+
+# --- resources per shard job ---
+threads_per_job: 1
+mem_gb: 9
+
+# --- featuremap shell script ---
+featuremap_sh: /path/to/srsnv/featuremap.sh
+
+# --- annotate_featuremap settings ---
+flow_order: TGCA
+motif_length_to_annotate: 3
+max_hmer_length: 20
+ppmseq_adapter_version: v1
+
+# --- training regions ---
+auto_bed: /path/to/resources/ug_hcr_autosomal.bed
+hcr_bed: /path/to/resources/ug_hcr.bed
+hmers_bed: /path/to/resources/hmers_7_and_higher.chr1-22XY.bed
+pancan_vcf: /path/to/resources/pancan_pcawg_2020.mutations_hg38_GNOMAD_dbsnp_beds.sorted.Annotated.HMER_LEN.edited.vcf.gz
+dbsnp_vcf: /path/to/resources/Homo_sapiens_assembly38.dbsnp138.chr1-22XY.snps.vcf.gz
+gnomad_vcf: /path/to/resources/af-only-gnomad.hg38.snps.AF_over_1e-3.vcf.gz
+
+# --- classifier parameters ---
+single_read_params: /path/to/resources/single_read_snv_params.json
