@@ -1,7 +1,42 @@
 #!/usr/bin/env bash
+# =============================================================================
+# make_final_vcfs.sh
+#
+# Purpose:
+#   Produce the three final ppmSeq call sets from the multiread, singleton
+#   and HC-singleton VCFs of trinucDenoised_integration_refining.py:
+#     - final_multiread            multiread variants, non-multiallelic in raw data
+#     - final_putative_multiread   singleton after filtering, but seen >= 2 times
+#                                  in the raw outMap (non-multiallelic)
+#     - final_singleton_HC         singletons seen exactly once at every level
+#
+# Usage:
+#   bash make_final_vcfs.sh <sample_name> <multiread.vcf.gz> <singleton.vcf.gz> \
+#        <singleton_hc.vcf.gz> <output_dir>
+#
+# Inputs:
+#   multiread.vcf.gz     DUP_COUNT_FILTERED >= 2   (step07-1)
+#   singleton.vcf.gz     DUP_COUNT_FILTERED == 1   (step07-2)
+#   singleton_hc.vcf.gz  candidate HC singletons   (step08-2)
+#   All carry the INFO/DUP_COUNT_* annotations added in the previous step.
+#
+# Outputs (in <output_dir>, bgzipped and tabix-indexed):
+#   final_multiread_<sample>.vcf.gz
+#   final_putative_multiread_<sample>.vcf.gz
+#   final_singleton_HC_<sample>.vcf.gz
+#
+# Notes:
+#   - "Non-multiallelic" means DUP_COUNT_RAW_MULTI_ALLELE == DUP_COUNT_RAW,
+#     i.e. every raw outMap record at that position carries the same
+#     REF/ALT as the variant.
+#   - Per-filter before/after counts are printed to the pipeline log.
+#
+# Pipeline context:
+#   Snakemake rule: final (last step).
+# =============================================================================
+
 set -euo pipefail
 
-# Usage: bash make_final_vcfs.sh <sample_name> <multiread.vcf.gz> <singleton.vcf.gz> <singleton_hc.vcf.gz>
 
 SAMPLENAME=$1
 MULTIREAD_IN=$2
@@ -13,6 +48,7 @@ FINAL_MULTIREAD="${OUTDIR}/final_multiread_${SAMPLENAME}.vcf.gz"
 FINAL_PUTATIVE_MULTIREAD="${OUTDIR}/final_putative_multiread_${SAMPLENAME}.vcf.gz"
 FINAL_SINGLETON_HC="${OUTDIR}/final_singleton_HC_${SAMPLENAME}.vcf.gz"
 
+# Helpers: count records, index a VCF, print a before/after summary line
 count() { bcftools view -H "$1" | wc -l; }
 idx()   { tabix -f -p vcf "$1"; }
 report() {
@@ -28,13 +64,13 @@ bcftools view -i 'INFO/DUP_COUNT_RAW_MULTI_ALLELE=INFO/DUP_COUNT_RAW' "$MULTIREA
 idx "$FINAL_MULTIREAD"
 report "$before" "$(count "$FINAL_MULTIREAD")" "final_multiread"
 
-# 2. Putative multiread: singleton with DUP_COUNT_RAW>=2 and non-multiallelic
+# 2. Putative multiread: singletons after filtering that appear >= 2 times in the raw outMap
 before=$(count "$SINGLETON_IN")
 bcftools view -i 'INFO/DUP_COUNT_RAW>=2 && INFO/DUP_COUNT_RAW_MULTI_ALLELE=INFO/DUP_COUNT_RAW' "$SINGLETON_IN" -Oz -o "$FINAL_PUTATIVE_MULTIREAD"
 idx "$FINAL_PUTATIVE_MULTIREAD"
 report "$before" "$(count "$FINAL_PUTATIVE_MULTIREAD")" "final_putative_multiread"
 
-# 3. Singleton HC: QC check then keep only exact 1,1,1,1
+# 3. Singleton HC: QC check then keep only exact 1,1,1,1 ((DUP_COUNT_ 1. FILTERED, 2. RAW_MULTI_ALLELE, 3. RAW, 4. SNVQ40)
 echo "[singleton_HC QC]"
 bcftools query -f '%INFO/DUP_COUNT_FILTERED\t%INFO/DUP_COUNT_RAW_MULTI_ALLELE\t%INFO/DUP_COUNT_RAW\t%INFO/DUP_COUNT_SNVQ40\n' "$SINGLETON_HC_IN" \
 | awk -F'\t' '
