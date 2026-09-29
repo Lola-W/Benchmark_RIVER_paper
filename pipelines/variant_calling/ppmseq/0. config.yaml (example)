@@ -1,0 +1,12 @@
+# Paths (relative to the working directory)
+input_dir: "input"          # contains {sample}.outMap.vcf.gz, .sbsMap.vcf.gz, .homMap.vcf.gz
+output_dir: "output"
+interm_dir: "interm"
+resources_dir: "resources"
+
+# Sample -> germline VCF (matched normal / joint-called germline variants)
+# Multiple samples from the same individual can share one germline VCF.
+germline_vcf:
+  "sample_A1": "germline_variant/individual_A.joint.vcf.gz"
+  "sample_A2": "germline_variant/individual_A.joint.vcf.gz"
+  "sample_B1": "germline_variant/individual_B.joint.vcf.gz"
