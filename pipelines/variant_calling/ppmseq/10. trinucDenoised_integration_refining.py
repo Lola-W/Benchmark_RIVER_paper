@@ -1,4 +1,49 @@
 #!/usr/bin/env python3
+"""
+trinucDenoised_integration_refining.py
+
+Purpose:
+    Convert the trinucleotide-denoised TSV back into VCF, collapse duplicate
+    records of the same variant, annotate each variant with how often it was
+    seen in the raw outMap VCF, and split the result into multiread and
+    singleton call sets.
+
+Usage:
+    python trinucDenoised_integration_refining.py \
+        -p <step06.vcf.gz> -i <denoised.tsv> -o <all.vcf.gz> \
+        -m <multiread.vcf.gz> -s <singleton.vcf.gz> \
+        -t <singleton_hc.vcf.gz> --outmap <outMap.vcf.gz> [--threads N]
+
+Inputs:
+    -p  VCF whose header is copied (INFO definitions for the new fields
+        are added)
+    -i  Denoised TSV from trinuc_denoising.py
+    --outmap  Raw outMap VCF (bgzipped) used to count records per position
+
+Outputs (all bgzipped and tabix-indexed):
+    -o  All variants after deduplication
+    -m  Multiread:      DUP_COUNT_FILTERED >= 2
+    -s  Singleton:      DUP_COUNT_FILTERED == 1
+    -t  HC singleton:   DUP_COUNT_FILTERED == 1 AND DUP_COUNT_RAW_MULTI_ALLELE == 1
+                        (the only outMap record at that position)
+    -u  (optional, not used in the pipeline) Multiread with
+        DUP_COUNT_RAW <= --true_multi_raw_max
+
+Processing:
+    1. Rows sharing CHROM:POS:REF:ALT are collapsed into one record; the
+       row with the highest QUAL supplies the INFO fields and
+       DUP_COUNT_FILTERED stores the number of collapsed rows.
+    2. Sites where two or more different ALT alleles remain are dropped.
+    3. Records outside chr1-22, X and Y are skipped.
+    4. Raw counts are taken from outMap for the retained positions:
+         DUP_COUNT_RAW_MULTI_ALLELE  records at the same CHROM:POS
+         DUP_COUNT_RAW               records with the same CHROM:POS:REF:ALT
+         DUP_COUNT_SNVQ40            of those, records with FILTER == PASS
+
+Pipeline context:
+    Snakemake rule step07d_integration. The multiread, singleton and HC
+    singleton VCFs are turned into the final call sets by make_final_vcfs.sh.
+"""
 
 import argparse
 import csv
@@ -9,8 +54,10 @@ import sys
 import tempfile
 from collections import defaultdict
 
+# TSV columns written as INFO flags (present or absent, no value)
 FLAG_COLS = {"is_cycle_skip", "is_forward"}  # removed unused is_duplicate
 
+# Only canonical chromosomes are kept
 ALLOWED_CONTIGS = {f"chr{i}" for i in range(1, 23)} | {"chrX", "chrY"}
 
 NEW_INFO_DEFS = [
@@ -67,7 +114,11 @@ def inject_new_info_defs(header_lines: list) -> list:
 
 
 def build_info_from_row(row: dict) -> str:
-    """Convert TSV row dict to VCF INFO string."""
+    """Convert a TSV row into a VCF INFO string.
+
+    Fixed VCF columns are excluded, empty/NA values are omitted, and
+    flag columns are written as bare keys when their value is true.
+    """
     exclude = {"chrom", "pos", "ref", "alt", "qual", "filt", "sample_id"}
     parts = []
     for k, v in row.items():
@@ -99,12 +150,20 @@ def query_outmap_counts(
     threads: int,
     progress_every: int,
 ) -> tuple:
-    """Query outMap VCF for DUP_COUNT annotations."""
-    # ensure tabix index exists
+    """Count outMap records at the positions of the retained variants.
+
+    Returns three dicts:
+        raw_multi[CHROM:POS]           records at the position (any REF/ALT)
+        raw[CHROM:POS:REF:ALT]         records with the identical variant
+        pas[CHROM:POS:REF:ALT]         of those, records with FILTER == PASS
+    """
+    
+    # Region queries need an index
     if not (os.path.exists(outmap_vcfgz + ".tbi") or os.path.exists(outmap_vcfgz + ".csi")):
         sys.stderr.write(f"[INFO] indexing: {outmap_vcfgz}\n")
         run_cmd(["bcftools", "index", "-t", outmap_vcfgz])
 
+    # Collect the exact variants/positions we care about, and one BED interval per unique position
     want_key, want_pos, seen_pos, bed_rows = set(), set(), set(), []
     for chrom, pos, ref, alt in variant_keys:
         poskey, key = f"{chrom}:{pos}", f"{chrom}:{pos}:{ref}:{alt}"
@@ -125,6 +184,7 @@ def query_outmap_counts(
 
         sys.stderr.write(f"[INFO] outMap query: unique_positions={len(bed_rows):,}, unique_keys={len(want_key):,}\n")
 
+        # Stream only the outMap records that fall on the wanted positions
         cmd = ["bcftools", "view", "-H", "--threads", str(threads), "-R", bed_path, outmap_vcfgz]
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, bufsize=1)
 
@@ -151,8 +211,14 @@ def query_outmap_counts(
 def write_outputs(header_lines, records, raw_multi, raw, pas,
                   out_vcf_gz, out_multi_gz, out_single_gz,
                   out_true_single_gz, out_true_multi_gz, true_multi_raw_max):
-    """Write all output VCF files."""
+    """Write the all-variants VCF and the optional subset VCFs.
+
+    Every record gets the DUP_COUNT_* annotations and is written to the
+    subsets whose condition it satisfies. Files are written uncompressed
+    in a temp directory, then bgzipped and indexed.
+    """
     with tempfile.TemporaryDirectory() as td:
+        # Only outputs that were requested get a file
         paths = {
             "all":         os.path.join(td, "out.vcf"),
             "multi":       os.path.join(td, "out.multi.vcf")        if out_multi_gz else None,
@@ -221,6 +287,12 @@ def main():
 
     header = inject_new_info_defs(read_vcf_header(args.previous_vcf))
 
+
+    # ---- Step 1: read the TSV and collapse identical variants ----
+    # best[key]  = (highest QUAL, INFO string of that row)
+    # dup[key]   = number of TSV rows for the variant (DUP_COUNT_FILTERED)
+    # order_keys = variants in first-seen order (keeps output order stable)
+    
     best, dup, order_keys = {}, {}, []
     alts_per_site = defaultdict(set)
     n_rows = n_skip = 0
@@ -246,6 +318,7 @@ def main():
             if n_rows % 1_000_000 == 0:
                 sys.stderr.write(f"[INFO] TSV rows processed={n_rows:,}\n")
 
+    # ---- Step 2: drop multi-allelic sites (>= 2 different ALTs remaining) ----
     multi_sites = {site for site, alts in alts_per_site.items() if len(alts) >= 2}
     records, n_drop = [], 0
     for chrom, pos, ref, alt in order_keys:
@@ -257,11 +330,13 @@ def main():
 
     sys.stderr.write(f"[INFO] input_rows={n_rows:,}, skipped={n_skip:,}, multi_allelic_dropped={n_drop:,}, variants={len(records):,}\n")
 
+    # ---- Step 3: annotate with raw outMap counts ----
     variant_keys = [(c, p, r, a) for c, p, r, a, _, __, ___ in records]
     raw_multi, raw, pas = query_outmap_counts(
         args.outmap, variant_keys, args.threads, args.progress_every
     )
 
+    # ---- Step 4: write the VCFs ----
     write_outputs(
         header, records, raw_multi, raw, pas,
         args.output_vcf, args.output_multiread, args.output_singleton,
