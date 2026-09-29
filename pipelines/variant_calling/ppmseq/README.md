@@ -119,11 +119,11 @@ VCF, given in `config.yaml` (`germline_vcf`). See `config.example.yaml`.
 The following files are expected in `resources/`.
 
 | File | Source / how it was generated |
-|---|---|
-| `af-only-gnomad.hg38.snps.AF_over_1e-3.vcf.gz` | <gnomAD version; how SNPs with AF > 1e-3 were extracted> |
-| `PON_q40_12files.dedup.vcf` | <how the panel of normals was built: samples, quality criterion> |
-| `hmers_7_and_higher.chr1-22XY.bed` | <how homopolymers >= 7 bp were extracted from hg38> |
-| `simple_repeats_hg38.bed` | <source, e.g. UCSC simple repeats track> |
+|----|---|
+| `af-only-gnomad.hg38.snps.AF_over_1e-3.vcf.gz` | GATK Mutect2 `af-only-gnomad` resource (hg38), restricted to SNPs with AF > 0.001 |
+| `PON_q40_12files.dedup.vcf` | Panel of normals merged from 12 ppmSeq call sets (10 cfDNA samples and 2 additional ppmSeq somatic call sets) provided by Ultima Genomics |
+| `hmers_7_and_higher.chr1-22XY.bed` | Homopolymers of length ≥ 7 bp in hg38 distributed by Ultima Genomics |
+| `simple_repeats_hg38.bed` | UCSC Genome Browser Simple Repeats track (hg38) |
 
 ## Usage
 
