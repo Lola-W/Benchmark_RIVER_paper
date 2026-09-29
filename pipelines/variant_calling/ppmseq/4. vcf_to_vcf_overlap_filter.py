@@ -98,7 +98,7 @@ def filter_vcf_to_temp(input_vcf, filter_keys, temp_vcf):
             if len(fields) < 5:
                 continue
             n_total += 1
-            
+            # Remove the record if any of its ALT alleles is in the filter set
             if any(key in filter_keys for key in variant_keys(fields)):
                 n_removed += 1
                 continue  # Skip writing to output
@@ -113,11 +113,14 @@ def main():
     if not args.output_vcf_gz.endswith(".vcf.gz"):
         sys.exit("[ERROR] --output-vcf-gz must end with .vcf.gz")
 
+    # Step 1: build the lookup set from the filter VCF
     sys.stderr.write(f"[INFO] Loading filter variants from: {args.filter_vcf}\n")
     filter_keys, n_filter_records = load_filter_keys(args.filter_vcf)
     sys.stderr.write(f"[INFO] Filter VCF records loaded: {n_filter_records}\n")
     sys.stderr.write(f"[INFO] Filter allele keys loaded:  {len(filter_keys)}\n")
 
+    # Step 2: filter the input into a temporary uncompressed VCF, then
+    # bgzip + index it (the temp directory is removed automatically)
     with tempfile.TemporaryDirectory(prefix="vcf_overlap_filter_") as tmpdir:
         temp_vcf = os.path.join(tmpdir, "filtered.tmp.vcf")
 
