@@ -1,3 +1,81 @@
+# =============================================================================
+# ppmSeq somatic variant post-hoc filtering pipeline
+#
+# Purpose:
+#   Filter ppmSeq outMap variant calls and produce three final call sets
+#   per sample: multiread, putative multiread and high-confidence(HC) singleton.
+#
+# Usage:
+#   cp config.example.yaml config.yaml    # edit sample names and germline VCFs
+#   snakemake -n                          # dry run
+#
+#   The pipeline was run on a SLURM cluster inside a tmux session :
+#     tmux new -s ppmseq
+#     snakemake --slurm -j 10 --cores 20 --keep-going \
+#         --default-resources slurm_partition="___" \
+#         --rerun-incomplete --configfile config.yaml
+#
+# Inputs (in `input_dir`; samples are discovered from *.outMap.vcf.gz):
+#   {sample}.outMap.vcf.gz   per-read SNV FeatureMap with SNVQ (QUAL) and
+#                            ML_QUAL (INFO), output of the Ultima SRSNV
+#                            pipeline
+#   {sample}.sbsMap.vcf.gz   loci supported by a single read (FP-like
+#                            training data)
+#   {sample}.homMap.vcf.gz   loci supported by most reads, likely homozygous
+#                            germline (TP-like training data)
+#   All VCFs must be bgzipped and tabix-indexed. The germline VCF of each
+#   sample is given in config.yaml (`germline_vcf`).
+#
+# Resources (in `resources_dir`, in addition to the scripts):
+#   PON_q40_12files.dedup.vcf                          panel of normals
+#   af-only-gnomad.hg38.snps.AF_over_1e-3.vcf.gz       gnomAD SNPs, AF > 1e-3
+#   hmers_7_and_higher.chr1-22XY.bed                   homopolymers >= 7 bp
+#   simple_repeats_hg38.bed                            simple tandem repeats
+#
+# Workflow (per sample):
+#   Training data for trinucleotide thresholds
+#     overlap_sbs    outMap ∩ sbsMap  (FP-like)
+#     overlap_hom    outMap ∩ homMap  (TP-like)
+#
+#   Variant filtering
+#     step00_pass        keep FILTER == PASS (SNVQ >= 40)
+#     step01_germline    remove germline variants
+#     step02_st_et       keep st == MIXED and et == MIXED
+#     step03_hmer        remove homopolymer (>= 7 bp) regions
+#     step04_str         remove simple tandem repeat regions
+#     step05_pon         remove panel-of-normals variants
+#     step06_gnomad      remove gnomAD variants
+#
+#   Trinucleotide-context denoising
+#     step07a_conversion   filtered VCF -> TSV
+#     step07b_training     learn per-context ML_QUAL thresholds
+#     step07c_denoising    apply the thresholds (plus a global ML_QUAL floor of 12)
+#     step07d_integration  TSV -> VCF, collapse duplicates, annotate with
+#                          raw outMap counts, split multiread / singleton
+#
+#   Final call sets
+#     final                final_multiread, final_putative_multiread,
+#                          final_singleton_HC
+#
+# Outputs (in `output_dir`/{sample}/):
+#   final_multiread_{sample}.vcf.gz
+#   final_putative_multiread_{sample}.vcf.gz
+#   final_singleton_HC_{sample}.vcf.gz
+#   Intermediate files of every step and a per-sample pipeline.log are kept
+#   in the same directory.
+#
+# Requirements:
+#   snakemake, bcftools, htslib (bgzip, tabix), bedtools,
+#   python 3 with pandas, numpy and scikit-learn
+#
+# Tested with outMap files from Ultima SRSNV v1.22.1 (INFO/ML_QUAL).
+#
+# Reference:
+#   Cheng et al., bioRxiv 2025, doi:10.1101/2025.08.11.669689
+#   (ppmSeq SNV denoising and trinucleotide-specific thresholding)
+# =============================================================================
+
+
 configfile: "config.yaml"
 
 wildcard_constraints:
