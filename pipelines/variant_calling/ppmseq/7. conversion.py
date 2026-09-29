@@ -4,8 +4,8 @@ conversion.py
 
 Purpose:
     Convert a ppmSeq outMap featuremap VCF into a flat TSV table, one row
-    per variant, so that the trinucleotide denoising steps can work on it
-    with pandas.
+    per VCF record (an SNV observed in one read -> the same variant can occur in several rows),
+    so that the trinucleotide denoising steps can work on it with pandas.
 
 Usage:
     python conversion.py --vcf <outMap.vcf.gz> --out <output.tsv>
@@ -19,8 +19,9 @@ Output:
             - CHROM, POS, REF, ALT, QUAL, FILTER
             - all INFO features listed in `features` (typed as int/float)
             - flag features is_cycle_skip / is_forward (1 if present, else 0)
-            - triN: strand-normalized trinucleotide substitution context,
-              e.g. "A[C>T]G"
+            - triN: trinucleotide substitution context in the orientation in
+              which the read was sequenced (192 motifs; not collapsed to the
+              96 pyrimidine-centered contexts), e.g. A[C>T]G
             - prev_3bp / next_3bp: 3 bp of flanking sequence on each side
 
 Pipeline context:
@@ -49,6 +50,7 @@ def rev_triN(triN: str) -> str:
 def vcf_to_df(vcf_path: str) -> pd.DataFrame:
     # Convert ppmSeq outMap featuremap VCF to DataFrame.
     # INFO key-value features to extract (missing keys become NA)
+    
     features = [
         'X_EDIST','X_FC1','X_FC2','X_FILTERED_COUNT','X_FLAGS',
         'X_INDEX','X_LENGTH','X_MAPQ','X_READ_COUNT',
@@ -80,9 +82,10 @@ def vcf_to_df(vcf_path: str) -> pd.DataFrame:
                     row_flags[item] = 1
 
 
-            # Build the trinucleotide context -> prev[ref>alt]next
+            # Build the trinucleotide context as "prev[ref>alt]next".
             # For reverse-strand reads (X_FLAGS 16 or 1040), take the reverse
-            # complement so all variants are reported on the same strand.
+            # complement so the context is given in the read's sequencing orientation (192 motifs, not collapsed to 96).
+
             v = info_dict.get('trinuc_context_with_alt', '')
             triN = f"{v[0]}[{v[1]}>{v[3]}]{v[2]}" if len(v) >= 4 else None
             if info_dict.get('X_FLAGS') in ('16', '1040') and triN:
