@@ -11,9 +11,9 @@ Usage:
     python conversion.py --vcf <outMap.vcf.gz> --out <output.tsv>
 
 Input:
-    --vcf   Bgzipped outMap featuremap VCF (per-read INFO features such as
-            X_*, st, et, rq, ML_QUAL, prev_*/next_* flanking bases)
-
+    --vcf   Bgzipped outMap featuremap VCF, after the filtering steps up to
+            step06 (per-read INFO features such as X_*, st, et, rq, ML_QUAL, prev_*/next_* flanking bases)
+            
 Output:
     --out   Tab-separated table with
             - CHROM, POS, REF, ALT, QUAL, FILTER
