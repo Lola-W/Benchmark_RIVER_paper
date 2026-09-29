@@ -1,4 +1,33 @@
 #!/usr/bin/env python3
+"""
+conversion.py
+
+Purpose:
+    Convert a ppmSeq outMap featuremap VCF into a flat TSV table, one row
+    per variant, so that the trinucleotide denoising steps can work on it
+    with pandas.
+
+Usage:
+    python conversion.py --vcf <outMap.vcf.gz> --out <output.tsv>
+
+Input:
+    --vcf   Bgzipped outMap featuremap VCF (per-read INFO features such as
+            X_*, st, et, rq, ML_QUAL, prev_*/next_* flanking bases)
+
+Output:
+    --out   Tab-separated table with
+            - CHROM, POS, REF, ALT, QUAL, FILTER
+            - all INFO features listed in `features` (typed as int/float)
+            - flag features is_cycle_skip / is_forward (1 if present, else 0)
+            - triN: strand-normalized trinucleotide substitution context,
+              e.g. "A[C>T]G"
+            - prev_3bp / next_3bp: 3 bp of flanking sequence on each side
+
+Pipeline context:
+    Snakemake rule step07a_conversion (input: step06 VCF).
+    The TSV is consumed by trinuc_denoising.py (step07c).
+"""
+
 
 import gzip
 import os
@@ -8,13 +37,18 @@ import pandas as pd
 
 
 def rev_triN(triN: str) -> str:
-    """Reverse complement of a trinucleotide context."""
+    """
+    Reverse complement of a trinucleotide context.
+
+    Input/output format is "X[Y>Z]W" (e.g. "A[C>T]G" -> "C[G>A]T").
+    """
     comp = {'A':'T', 'T':'A', 'C':'G', 'G':'C'}
     return comp[triN[6]] + '[' + comp[triN[2]] + '>' + comp[triN[4]] + ']' + comp[triN[0]]
 
 
 def vcf_to_df(vcf_path: str) -> pd.DataFrame:
-    """Convert ppmSeq outMap featuremap VCF to DataFrame."""
+    # Convert ppmSeq outMap featuremap VCF to DataFrame.
+    # INFO key-value features to extract (missing keys become NA)
     features = [
         'X_EDIST','X_FC1','X_FC2','X_FILTERED_COUNT','X_FLAGS',
         'X_INDEX','X_LENGTH','X_MAPQ','X_READ_COUNT',
@@ -23,6 +57,7 @@ def vcf_to_df(vcf_path: str) -> pd.DataFrame:
         'max_softclip_length','hmer_context_ref','hmer_context_alt',
         'next_1','next_2','next_3','prev_1','prev_2','prev_3','ML_QUAL'
     ]
+    # INFO flags (no value): 1 if present in the record, otherwise 0
     flag_features = ['is_cycle_skip', 'is_forward'] #존재 여부로 0/1 판단
 
     records = {k: [] for k in features + flag_features +
@@ -35,7 +70,7 @@ def vcf_to_df(vcf_path: str) -> pd.DataFrame:
             fields = line.rstrip().split("\t")
             chrom, pos, _, ref, alt, qual, filt, info = fields[:8]
 
-            # Parse INFO into dict; flag features separately
+            # Parse INFO into dict. valueless entries are treated as flags
             info_dict, row_flags = {}, {k: 0 for k in flag_features}
             for item in info.split(';'):
                 if '=' in item:
@@ -44,7 +79,10 @@ def vcf_to_df(vcf_path: str) -> pd.DataFrame:
                 else:
                     row_flags[item] = 1
 
-            # Build trinucleotide context
+
+            # Build the trinucleotide context -> prev[ref>alt]next
+            # For reverse-strand reads (X_FLAGS 16 or 1040), take the reverse
+            # complement so all variants are reported on the same strand.
             v = info_dict.get('trinuc_context_with_alt', '')
             triN = f"{v[0]}[{v[1]}>{v[3]}]{v[2]}" if len(v) >= 4 else None
             if info_dict.get('X_FLAGS') in ('16', '1040') and triN:
@@ -70,6 +108,7 @@ def vcf_to_df(vcf_path: str) -> pd.DataFrame:
 
     df = pd.DataFrame(records)
 
+    # Cast columns to numeric types; unparsable values become NA
     int_cols = ['X_EDIST','X_FC1','X_FC2','X_FILTERED_COUNT','X_FLAGS','X_INDEX',
                 'X_LENGTH','X_MAPQ','X_READ_COUNT','a3','max_softclip_length',
                 'hmer_context_ref','hmer_context_alt','is_cycle_skip','is_forward']
