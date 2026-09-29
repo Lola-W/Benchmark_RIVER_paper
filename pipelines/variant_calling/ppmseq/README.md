@@ -174,7 +174,7 @@ The call sets carry the following `INFO` annotations, computed from the raw outM
   (192 motifs, not collapsed to 96). Variants must pass both their context's
   threshold and a global `ML_QUAL` floor of 12. Contexts without a learned
   threshold use the floor.
-- **Three-tier call sets.** Rather than discarding single-read evidence, variants are tiered as multiread, putative multiread (one record after denoising, two or more in the raw outMap) or HC singleton, where tracing back to the raw outMap confirms exactly one PASS record with no competing allele, so that singletons reliable enough to be verified by orthogonal sequencing are kept and as many accurate variants as possible are recovered.
+- **Three-tier call sets.** Rather than discarding single-read evidence, variants are tiered as multiread, putative multiread (one record after denoising, two or more in the raw outMap, but not used in this paper.) or HC singleton, where tracing back to the raw outMap confirms exactly one PASS record with no competing allele, so that singletons reliable enough to be verified by orthogonal sequencing are kept and as many accurate variants as possible are recovered.
 
 ## Citation
 
