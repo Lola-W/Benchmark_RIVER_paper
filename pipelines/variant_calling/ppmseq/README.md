@@ -36,7 +36,18 @@ ppmSeq CRAM files. It produces the three inputs of stage 2:
 | `homMap` | Homozygous-SNV FeatureMap (`create_hom_snv_featuremap`) |
 | `outMap` | FeatureMap scored by the trained classifier (`srsnv_training`, `srsnv_inference`) |
 
-<how to run stage 1: input_paths, config, sbatch>
+- Stage 1 is run once per sample in its own working directory, using
+`srsnv/Snakefile`, a config file `snake_conf.yaml` (tool, container and
+reference paths; see `snake_conf.example.yaml`) and a sample sheet
+`input_paths.tsv`. Jobs are submitted to SLURM with `run_srsnv_legacy.sb`.
+
+- `input_paths.tsv` is tab-separated with the columns
+`id`, `sex`, `cram`, `sample`, `sorter_stats_json`, `matched_normal`
+(`matched_normal` is not used and can be `NA`). The `sample` name is used for
+all output files.
+
+- The inputs of stage 2 are written to `2.0-vcflite_SBSMap/` (sbsMap),
+`3.0-create_homeSnvFeatureMap/` (homMap) and `6.0-outmap/` (outMap).
 
 Step descriptions follow the Ultima documentation
 (`Ultimagen/healthomics-workflows`, v1.22.1).
@@ -116,10 +127,8 @@ The following files are expected in `resources/`.
 
 ## Usage
 
-```bash
-cp config.example.yaml config.yaml    # edit sample names and germline VCFs
-snakemake -n                          # dry run
-```
+- Sample names and their germline VCFs are specified in `config.yaml`
+(see `config.example.yaml`)
 
 + The pipeline was run on a SLURM cluster inside a tmux session
 
