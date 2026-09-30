@@ -4,7 +4,8 @@ Code and processed input tables for the mosaicism benchmark study, organized
 into analysis pipelines and figure scripts
 
 - [Figure scripts](figure/README.md): eight scripts for the listed manuscript panels.
-- [Variant calling](pipelines/variant_calling/README.md): caller workflows, configurations, and alignment placeholders; ppmSeq calling is maintained separately.
+- [Variant calling](https://github.com/Lola-W/Benchmark_RIVER_paper/blob/main/pipelines/variant_calling/README.md): caller workflows, configurations, and alignment placeholders.
+   - [ppmSeq](https://github.com/Lola-W/Benchmark_RIVER_paper/blob/main/pipelines/variant_calling/ppmseq/README.md): SRSNV scoring and post-hoc filtering of ppmSeq somatic SNV calls.
 - [Data preparation](pipelines/data_preparation/README.md): annotation, filtering, read evidence, coverage, and signature analysis.
 - `raw_data/`: 15 processed analysis tables and 25 coverage CDF tables used by the figure scripts, not raw sequencing reads.
 - `R/nature_biotech_ggplot.R`: shared figure styling.
@@ -17,8 +18,7 @@ Evidence Recovery*. Version 0.1.0, commit
 [`6bc202e`](https://github.com/Lola-W/RIVER/tree/6bc202eed7c345a6876124b24829b877bc7726a3).
 [Source repository](https://github.com/Lola-W/RIVER). MIT License.
 
-**ppmSeq variant calling:** maintained in a separate repository. The repository
-URL is **pending**: `https://github.com/OWNER/PPMSEQ_VARIANT_CALLING` 
+**ppmSeq:** [ppmSeq](pipelines/variant_calling/ppmseq/README.md) is a two-stage Snakemake workflow that runs the Ultima SRSNV pipeline on ppmSeq CRAMs, then removes germline variants, recurrent artifacts and sequence-context-specific noise to produce multiread, putative multiread and high-confidence singleton somatic SNV call sets.
 
 ## Reproduce figures
 
