@@ -16,13 +16,12 @@ Study caller workflows and settings. Install the third-party callers listed in
 | `dupcaller` | NanoSeq or UDSeq brain/control BAMs, germline VCF, noise mask | DupCaller call outputs at the configured prefix |
 | `hidefseq` | CCS reads, PacBio germline BAM and Clair3/DeepVariant germline VCFs | HiDEF-seq `finalCalls/` tables, including `1-22X` SBS calls |
 | `pta` | Single-neuron and bulk BAMs | SCAN2 `somatic_genotypes.rda` and `callable_regions.rda` per neuron |
+| `ppmseq` | Brain CRAM with Ultima sorter statistics JSON, and germline VCF | `output/*/final_multiread_*.vcf.gz`, `final_putative_multiread_*.vcf.gz` and `final_singleton_HC_*.vcf.gz` |
 
 **Scope:** caller outputs are not yet the final benchmark union or the input
 tables in `../../raw_data/`. Cross-caller consensus, cross-sample filtering,
 amplicon validation, plotting-table generation, and coordinate conversion belong
-to the subsequent processing package. ppmSeq calling is external; see the
-[separate repository placeholder](ppmseq/README.md). This package includes no
-ppmSeq calling scripts or caller configurations.
+to the subsequent processing package.
 
 ## Setup
 
@@ -73,6 +72,17 @@ these panel formats are not interchangeable. This hg38 configuration was not
 executed or independently validated during packaging. See
 [pta/input/README.md](pta/input/README.md) for BAM naming.
 
+ppmSeq (`ppmseq/`) starts from ppmSeq CRAM files aligned to
+`Homo_sapiens_assembly38.fasta` and the Ultima sorter statistics JSON of each
+sample, listed in `ppmseq/srsnv/input_paths.tsv`; do not substitute the other GRCh38
+builds above. The filtering stage also needs one germline VCF per sample from
+matched-normal WGS (`germline_vcf` in `ppmseq/config.yaml`). The SRSNV stage writes
+the outMap, sbsMap and homMap VCFs read by the filtering stage, so an existing
+SRSNV run can be resumed there. Containers, the GATK jar and SRSNV reference
+resources are set in `ppmseq/srsnv/snake_conf.yaml`, and the panel of normals,
+gnomAD and BED files for filtering are read from `ppmseq/resources/`; none are
+distributed. See [ppmseq/README.md](ppmseq/README.md) for details.
+
 Recorded sex values are retained in each method's configuration. They differ
 between some original pipelines; they have not been silently harmonized here.
 
@@ -98,6 +108,13 @@ sbatch illumina/deepmosaic/run.sbatch illumina/deepmosaic/config.sh
 sbatch illumina/deepsomatic/run.sbatch illumina/deepsomatic/config.sh
 sbatch dupcaller/run.sbatch dupcaller/nano.config.sh
 sbatch dupcaller/run.sbatch dupcaller/ud.config.sh
+
+# ppmSeq SRSNV (stage 1): submit from a per-sample working directory (see ppmseq/srsnv/)
+sbatch ppmseq/srsnv/run_srsnv_legacy.sb
+# ppmSeq filtering (stage 2): run from ppmseq/ after SRSNV finishes
+snakemake --slurm -j 10 --cores 20 --keep-going \
+    --default-resources slurm_partition=your_partition \
+    --rerun-incomplete --configfile config.yaml
 
 # Submit from hidefseq/ after editing its YAML and Slurm/container configuration:
 cd hidefseq
