@@ -2,6 +2,8 @@
 
 Developed by KAIST (Dr. Do Hyeon Cha, Dr. Saehoon Jung, Jinhee Ryu, Yunhye Noh, Dr. Young Seok Ju, and Dr. Changuk Chung) and Inocras Inc. (Dr. Sangmoon Lee) with advices from UCSD School of Medicine (Jiaming Weng, Robyn Howarth, and Dr. Joseph G. Gleeson)
 
+Thanks to NYGC (Dr. Alexandre Pellan Cheng, and Dr. Dan-Avi Landau) for idea-pitching
+
 Two-stage workflow that generates ppmSeq SNV call sets analyzed in our paper:
 
 1. **SRSNV** (`srsnv/`): runs the Ultima Single Read SNV pipeline on ppmSeq CRAM
