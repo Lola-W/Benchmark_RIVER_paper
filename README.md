@@ -69,4 +69,4 @@ Before public release, complete the following:
 ## Contact info
 
 - Jiaming Weng: jmweng@ucsd.edu
-- Dr. Do Hyeon Cha: eric6890@gmail.com
+- Do Hyeon Cha, MD, MS: eric1@kaist.ac.kr
