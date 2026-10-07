@@ -65,3 +65,8 @@ Before public release, complete the following:
 - Replace the ppmSeq repository placeholder and provide reviewer/reader access to RIVER.
 - Supply sequencing-data accessions and stable sources for custom masks, models, and other derived resources listed in the pipeline documentation.
 - Specify the license for the original benchmark code and reuse terms for the processed tables. RIVER's MIT license applies to the separate RIVER package. Preserve attribution and license terms for reused third-party code, including the GPL-3.0 lab workflow source cited in the calling README.
+
+## Contact info
+
+Jiaming Weng: jmweng@ucsd.edu
+Dr. Do Hyeon Cha: eric6890@gmail.com
