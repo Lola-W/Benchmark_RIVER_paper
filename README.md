@@ -68,5 +68,5 @@ Before public release, complete the following:
 
 ## Contact info
 
-Jiaming Weng: jmweng@ucsd.edu
-Dr. Do Hyeon Cha: eric6890@gmail.com
+- Jiaming Weng: jmweng@ucsd.edu
+- Dr. Do Hyeon Cha: eric6890@gmail.com
